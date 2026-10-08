@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { openCodePeerPermissionClass } from './peer-permissions.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const terminal = info => Boolean(info?.time?.completed && (info.error || info.finish && !['tool-calls', 'unknown'].includes(info.finish)));
@@ -71,18 +72,29 @@ export class OpenCodeMaintenance {
       this.requests('/permission', id), this.requests('/question', id),
     ]);
     const head = openCodeHead(session, messages, states?.[id], children);
+    let peerPermissionClass = null;
+    try {
+      const result = await this.client._client.get({ url: '/agent', query: { directory: this.directory }, signal: AbortSignal.timeout(10000) });
+      if (!result.error && (!result.response || result.response.ok) && Array.isArray(result.data)) {
+        const selected = result.data.find(agent => agent.name === head.agent);
+        if (selected) peerPermissionClass = openCodePeerPermissionClass(selected.permission, session.permission || []);
+      }
+    } catch { /* Unknown permissions never establish bypass. */ }
     const input = this.inputState(id);
     for (const row of head.rows) input.pending.delete(row.info.id);
     const activity = permissions ? 'waiting_permission' : questions ? 'waiting_input' : head.activity;
+    // Effort and permission configuration are inherited at dispatch. They do
+    // not invalidate maintenance; native approvals and real work still do.
     const revision = hash([head.user?.info.id, head.last?.info.id, head.latestTurn?.status, activity, head.pendingTools,
-      head.model, head.agent, head.effort, head.permissionMode, session.revert || null, children.map(c => c.id), input.revision, [...input.pending]]);
+      head.model, head.agent, session.revert || null, children.map(c => c.id), input.revision, [...input.pending]]);
     const state = { sessionId: id, cwd: this.directory, instanceId: this.instanceId, connected: true, activity,
       activityRevision: revision, activeTurnId: head.activeTurnId, latestTurn: head.latestTurn, lastCompletedTurnId: head.lastCompletedTurnId,
       quota: head.quota,
       model: head.model, modelSelection: head.modelSelection, agent: head.agent, effort: head.effort, permissionMode: head.permissionMode,
+      peerPermissionClass,
       subagentHistoryPresent: head.subagentHistoryPresent, pendingRequests: permissions + questions, queuedNativeInputs: input.pending.size,
       reverted: Boolean(session.revert), observedAt: new Date().toISOString(),
-      capabilities: { automaticMaintenance: true, sendControl: true, compact: true, interrupt: true, observeCompletion: true } };
+      capabilities: { automaticMaintenance: true, sendControl: true, compact: true, interrupt: true, observeCompletion: true, peerPermissionSelection: true, maintenanceSettingsLockFree: true } };
     const entry = await this.lastCompact(id);
     if (entry) {
       state.lastCompaction = entry.completion || this.compactionEvidence(entry, head);
@@ -185,7 +197,7 @@ export class OpenCodeMaintenance {
       const submit = async () => {
         try {
           if (kind === 'prompt') await this.native('promptAsync', id, { body: { messageID: messageId,
-            model: state.modelSelection, agent: state.agent, variant: state.effort,
+            model: current.state.modelSelection, agent: current.state.agent, variant: current.state.effort,
             parts: [{ type: 'text', text }] } });
           else if (kind === 'interrupt') await this.native('abort', id);
           else await this.native('summarize', id, { body: { ...state.modelSelection, auto: false }, signal: AbortSignal.timeout(300000) });

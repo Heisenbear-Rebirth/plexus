@@ -98,11 +98,81 @@ test('pending permission and SDK control requests block compaction', () => {
   state.host({ type: 'control_request', request_id: 'i', request: { subtype: 'initialize' } });
   assert.equal(Boolean(state.canCompact()), false);
   state.child({ type: 'control_response', response: { request_id: 'i', subtype: 'success' } });
+  assert.equal(Boolean(state.canCompact()), false);
+  state.observeNativeSelection({ model: 'fixture', effort: null });
   assert.equal(Boolean(state.canCompact()), true);
   state.child({ type: 'control_request', request_id: 'p', request: { subtype: 'can_use_tool' } });
   assert.equal(Boolean(state.canCompact()), false);
   state.host({ type: 'control_response', response: { request_id: 'p' } });
   assert.equal(Boolean(state.canCompact()), true);
+});
+
+test('native peer hold and expiry settle only the registered socket message without leaving a phantom wait', () => {
+  const s = new ClaudeProtocolState(randomUUID()); s.initialized = true;
+  const id = randomUUID(); s.expectPeer(id);
+  const before = s.activityRevision;
+  const event = { type: 'system', subtype: 'peer_message_hold', session_id: s.sessionId, message_uuid: id, lane: 'socket', from: 'untrusted-sender-name' };
+  s.child({ ...event, state: 'held', cause: 'no-mode-asserted' });
+  assert.equal(s.activity(), 'unknown'); assert.equal(s.publicState().peerDelivery.state, 'held');
+  assert.equal(s.publicState().peerDelivery.cause, 'no-mode-asserted'); assert.ok(s.activityRevision > before);
+  assert.equal(s.canCompact(), false);
+  s.child({ ...event, state: 'dropped', outcome: 'expired' });
+  assert.equal(s.activity(), 'idle'); assert.equal(s.publicState().pendingPeerMessages, 0);
+  assert.equal(s.publicState().peerDelivery.outcome, 'expired'); assert.equal(s.canCompact(), true);
+  assert.equal(s.publicState().peerDelivery.cause, 'no-mode-asserted'); assert.ok(s.publicState().peerDelivery.heldAt);
+  assert.doesNotMatch(JSON.stringify(s.publicState()), /untrusted-sender-name/);
+  s.child({ ...event, state: 'held', cause: 'no-mode-asserted' });
+  assert.equal(s.activity(), 'idle', 'late held frames cannot resurrect a settled message');
+});
+
+test('peer hold frames cannot clear another lane, another session or an unrelated message; release still waits for receipt', () => {
+  const s = new ClaudeProtocolState(randomUUID()); s.initialized = true;
+  const id = randomUUID(); s.expectPeer(id);
+  const event = { type: 'system', subtype: 'peer_message_hold', session_id: s.sessionId, message_uuid: id, lane: 'socket', state: 'dropped', outcome: 'expired' };
+  for (const patch of [{ lane: 'stdin' }, { session_id: randomUUID() }, { message_uuid: randomUUID() }]) s.child({ ...event, ...patch });
+  assert.equal(s.publicState().pendingPeerMessages, 1);
+  s.child({ ...event, state: 'held', cause: 'mode-mismatch' });
+  s.child({ ...event, state: 'released' });
+  assert.equal(s.publicState().peerDelivery.state, 'released'); assert.equal(s.canCompact(), false);
+  s.child({ type: 'user', session_id: s.sessionId, uuid: id, origin: { kind: 'peer' }, isReplay: true, message: { role: 'user', content: 'fixture' } });
+  assert.equal(s.activity(), 'running'); assert.equal(s.publicState().peerDelivery.state, 'received');
+  assert.equal(s.publicState().pendingPeerMessages, 0);
+});
+
+test('deferring an unverified sender clears the prepared peer intent and does not leave a phantom wait', async t => {
+  const h = await harness(t), runtime = new ClaudeRuntime(h.id, { folder: join(h.directory, 'instances') });
+  runtime.sendPeer = async () => ({ status: 'deferred', notSubmitted: true, reason: 'sender_permissions_unknown' });
+  const result = await runtime.sendMessage('not submitted', { requestId: randomUUID() });
+  assert.equal(result.status, 'deferred'); const state = await runtime.status();
+  assert.equal(state.pendingPeerMessages, 0); assert.equal(state.activity, 'idle');
+  assert.equal(h.messages.some(m => m.fixtureReceivedExactly), false);
+});
+
+test('dropping a held peer does not stop current work or erase a genuine quota failure', () => {
+  for (const limited of [false, true]) {
+    const s = new ClaudeProtocolState(randomUUID()); s.initialized = true;
+    const id = randomUUID(); s.expectPeer(id); s.host({ type: 'user', uuid: 'original' });
+    if (limited) { s.child({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour' } });
+      s.child({ type: 'assistant', error: 'rate_limit' }); s.child({ type: 'result', is_error: true }); }
+    s.child({ type: 'system', subtype: 'peer_message_hold', session_id: s.sessionId, message_uuid: id, lane: 'socket', state: 'dropped', outcome: 'expired' });
+    assert.equal(s.publicState().pendingPeerMessages, 0); assert.equal(s.activity(), limited ? 'quota_limited' : 'running');
+  }
+});
+
+test('real wrapper exposes native held/dropped receipts and removes the completed peer wait', async t => {
+  const h = await harness(t), current = await h.status(), id = randomUUID();
+  assert.equal(current.state.capabilities.peerDeliveryLifecycle, true);
+  const prepared = await fetch(current.record.endpoint + '/peer-intent', { method: 'POST',
+    headers: { authorization: 'Bearer ' + current.record.token, 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: h.id, instanceId: current.record.instanceId, messageId: id, action: 'prepare' }) });
+  assert.equal((await prepared.json()).status, 'ready');
+  h.send({ type: 'fixture_peer_hold', uuid: id, state: 'held', cause: 'no-mode-asserted' });
+  const held = await until(async () => { const s = (await h.status()).state; return s.peerDelivery?.state === 'held' && s; }, 'native hold observed');
+  assert.equal(held.activity, 'unknown'); assert.equal(held.pendingPeerMessages, 1);
+  h.send({ type: 'fixture_peer_hold', uuid: id, state: 'dropped', outcome: 'expired' });
+  const settled = await until(async () => { const s = (await h.status()).state; return s.peerDelivery?.state === 'dropped' && s; }, 'native drop observed');
+  assert.equal(settled.activity, 'idle'); assert.equal(settled.pendingPeerMessages, 0); assert.equal(settled.canCompact, true);
+  assert.ok(h.messages.some(m => m.type === 'system' && m.subtype === 'peer_message_hold' && m.state === 'dropped'));
 });
 
 test('old Claude wrapper is observation-only until it can classify quota interruptions', async () => {
@@ -298,6 +368,20 @@ test('Claude session selection stays distinct from per-response model metadata a
   s.child({ type: 'control_response', response: { request_id: 'model-choice', subtype: 'success' } });
   assert.equal(s.model, 'new-choice');
   s.observeApiUsage('resolved-api-model', usage); assert.equal(s.model, 'new-choice');
+  s.observeNativeSelection({ model: 'new-choice[1m]', effort: 'high' });
+  s.child({ type: 'system', subtype: 'init', model: 'new-choice' });
+  assert.equal(s.model, 'new-choice[1m]'); assert.equal(s.modelSelectionSource, 'native-settings');
+});
+
+test('acknowledged native flag settings trigger a fresh read before maintenance, including clearing effort to default', async t => {
+  const h = await harness(t);
+  assert.equal((await h.status()).state.effort, 'high');
+  h.send({ type: 'control_request', request_id: 'changed-effort', request: { subtype: 'apply_flag_settings', settings: { effort: null } } });
+  await until(async () => (await h.status()).state.selectionPending, 'settings read required');
+  const pending = (await h.status()).state; assert.equal(pending.canCompact, false);
+  const resumed = await until(async () => { const s=(await h.status()).state; return !s.selectionPending && s.effort === null && s; }, 'explicit default synchronized');
+  assert.equal(resumed.selectionKnown.includes('effort'), true); assert.equal(resumed.canCompact, true);
+  assert.equal(h.messages.some(m => m.fixtureReceivedExactly), false);
 });
 
 test('real wrapper and manager accept long-running handoff plus synthetic notices, then compact and restore once with both receipts', async t => {
@@ -369,9 +453,17 @@ test('Codex peer wakes a quota-limited Claude; later messages stay queued and co
   await manager.controller.tick(); assert.equal(manager.store.getSetting(quotaSettingKey(target)).state, 'waiting');
   assert.equal(h.messages.filter(m => m.fixtureReceivedExactly && m.message?.content === values.maintenance.quotaContinue).length, 0);
   await writeFile(join(h.directory, 'quota-utilization.json'), JSON.stringify({ value: 5 }));
-  const waiting = manager.store.getSetting(quotaSettingKey(target));
-  manager.store.setSetting(quotaSettingKey(target), { ...waiting, nextCheckAt: '2000-01-01T00:00:00Z' });
-  await manager.controller.tick();
+  // The runtime and manager are separate processes. A quota timestamp a few
+  // milliseconds ahead must remain untrusted until a later polling tick.
+  await until(async () => {
+    const waiting = manager.store.getSetting(quotaSettingKey(target));
+    if (waiting.state === 'submitted') return true;
+    assert.equal(waiting.state, 'waiting');
+    manager.store.setSetting(quotaSettingKey(target), { ...waiting, nextCheckAt: '2000-01-01T00:00:00Z' });
+    await manager.controller.tick();
+    return manager.store.getSetting(quotaSettingKey(target)).state === 'submitted';
+  }, 'fresh quota continuation on a verified polling tick');
+  assert.equal(manager.store.getSetting(quotaSettingKey(target)).state, 'submitted', JSON.stringify(manager.store.getSetting(quotaSettingKey(target))));
   await until(async () => (await h.status()).state.lastControl?.status === 'completed', 'configured continuation completed');
   assert.equal(manager.store.getSetting(quotaSettingKey(target)).state, 'submitted');
   await manager.monitor.sample(target, { native: true }); await manager.service.mailbox.flush();

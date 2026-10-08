@@ -1,25 +1,24 @@
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { join, relative, isAbsolute } from 'node:path';
 import { readFile, realpath } from 'node:fs/promises';
-import { samePermissionSelection } from './runtime/codex-runtime.mjs';
 import { publicSession } from './address.mjs';
 import { receiptHash, recoverableReceiptPause } from './checkpoint-service.mjs';
 import { sessionKey } from './management-store.mjs';
 import { handoffPrompt, restorePrompt, continuePrompt } from './maintenance-prompts.mjs';
-import { maintenanceStage, restartCandidate, restartPlan, readRestartEvidence, controlTurnEnded } from './maintenance-recovery.mjs';
+import { maintenanceStage, restartCandidate, restartPlan, readRestartEvidence, controlTurnEnded, canRestartFromCurrent, confirmedCompactionFailure } from './maintenance-recovery.mjs';
 import { normalizeDirectory } from './directory-service.mjs';
 import { readAccessPolicy } from './access-policy.mjs';
 import { nativeMessageId } from './opencode-bridge.mjs';
 import { readPromptSettings } from './prompt-settings.mjs';
 import { QuotaRecovery } from './quota-recovery.mjs';
-import { modelChanged } from './model-identity.mjs';
+import { selectedModelChanged, missingSelectedSettings as missingSelection } from './model-identity.mjs';
+import { accountQuotaBlocked, freshAvailableQuota } from './quota-state.mjs';
+import { hasPendingSubagents } from './codex-subagents.mjs';
 
 const terminal = new Set(['completed', 'cancelled', 'needs_attention', 'user_intervened']);
 const active = s => ['running', 'waiting_permission', 'waiting_input'].includes(s.activity);
 const deadline = ms => new Date(Date.now() + ms).toISOString();
 const stageTimeout = { interrupting: 30000, writing_handoff: 10 * 60_000, awaiting_handoff_end: 60000, compacting: 5 * 60_000, restoring: 5 * 60_000, awaiting_restore_end: 60000 };
-const missingSelection = (before, after) => ['model', 'effort', 'permissionMode', 'permissionFingerprint', 'agent']
-  .some(key => before[key] != null && after[key] == null);
 
 function completedClaudeCompaction(cycle, runtime) {
   const requestId = cycle.compactResult?.requestId;
@@ -56,7 +55,7 @@ export class MaintenanceController {
       const access = await readAccessPolicy();
       // Active cycles keep their lock even when a user disables the monitor.
       const cycles = this.store.activeCycles().filter(c => access.permits(c.session.cwd));
-      for (const cycle of cycles.filter(c => !terminal.has(c.state) || restartCandidate(c))) void this.advance(cycle.id);
+      for (const cycle of cycles.filter(c => !terminal.has(c.state) || restartCandidate(c) || confirmedCompactionFailure(c) || c.quotaWaiting)) void this.advance(cycle.id);
       const observed = this.monitor.observeAll ? await this.monitor.observeAll() : null;
       await Promise.allSettled(this.store.policies().map(async policy => {
         if (this.closed) return;
@@ -79,32 +78,49 @@ export class MaintenanceController {
       void this.service.mailbox?.flush().catch(error => this.store.event('mailbox_error', { error: error.message }));
     } finally { this.ticking = false; }
   }
-  async trigger(session, policy, sample) {
+  async trigger(session, policy, sample, { replaceCycle } = {}) {
     this.store.restartConfirmation?.assertAllowed(session);
     if (!['codex', 'claude', 'opencode'].includes(session.client)) throw new Error('此客户端的自动维护尚未开放。');
     const runtime = sample.runtime;
-    if (runtime.quota || runtime.activity === 'quota_limited') throw new Error('额度不足中断期间不进行上下文压缩。');
+    if (runtime.selectionPending) throw new Error('正在同步当前模型设置，请等待核对完成。');
+    if (accountQuotaBlocked(runtime)) throw new Error('Codex 账户额度不足，暂不启动上下文维护。');
+    if ((runtime.quota || runtime.activity === 'quota_limited') && !sample.decision.quotaResume) throw new Error('额度不足中断期间不进行上下文压缩。');
     if (runtime.capabilities?.automaticMaintenance === false) throw new Error('此客户端的原生控制尚待本机验收，目前仅开放观察模式。');
     const required = ['readActivity', 'sendControl', 'compact', 'observeCompletion', ...(sample.decision.wasWorkingAtTrigger ? ['interrupt'] : [])];
     if (!required.every(c => runtime.capabilities?.[c])) throw new Error('目标客户端的维护能力尚未就绪。');
-    if (runtime.goalStatus === 'active' || runtime.backgroundTasks > 0 || runtime.queuedNativeInputs > 0 || runtime.subagentHistoryPresent
+    if (runtime.goalStatus === 'active' || runtime.backgroundTasks > 0 || runtime.queuedNativeInputs > 0 || hasPendingSubagents(runtime)
       || session.client === 'opencode' && (runtime.pendingRequests || runtime.reverted)) throw new Error('会话仍有原生目标、子agent、后台工作、权限请求或已排队输入，暂不能自动维护。');
     const metadata = await this.service.adapters[session.client].find(session.id);
     if (!metadata?.cwd) throw new Error('无法确认目标会话的工作目录。');
     (await readAccessPolicy()).assert(metadata.cwd);
     const target = publicSession(metadata);
+    if (replaceCycle && (target.id !== replaceCycle.session.id || target.client !== replaceCycle.session.client
+      || normalizeDirectory(target.cwd) !== normalizeDirectory(replaceCycle.session.cwd)))
+      throw new Error('目标会话或工作目录已改变，未重新开始维护。');
     const id = randomUUID(), stageTokens = { handoff: randomBytes(24).toString('base64url'), restored: randomBytes(24).toString('base64url') };
     const state = sample.decision.wasWorkingAtTrigger ? 'interrupting' : 'writing_handoff';
     const cycle = this.store.transaction(() => {
       this.store.restartConfirmation?.assertAllowed(session);
+      if (replaceCycle) {
+        this.assertActionCurrent(replaceCycle);
+        if (!canRestartFromCurrent(this.store.cycle(replaceCycle.id))) throw new Error('已存在压缩操作记录，不能重新开始维护。');
+        // Transfer the lock in the same transaction. No queued delivery can
+        // run between retiring the stale cycle and creating its replacement.
+        this.store.releaseCycle(replaceCycle.id, { cancel: true, releaseMessages: true });
+        this.store.setSetting('cycle-tokens:' + replaceCycle.id, null);
+      }
       const created = this.store.createCycle({ id, session: target, state, trigger: sample.decision.trigger,
-        policy, wasWorkingAtTrigger: sample.decision.wasWorkingAtTrigger, triggerRuntime: runtime, triggerUsage: sample.usage,
+        ...(replaceCycle ? { supersedesCycleId: replaceCycle.id } : {}),
+        policy, wasWorkingAtTrigger: sample.decision.wasWorkingAtTrigger, quotaResumeHandoff: sample.decision.quotaResume === true, triggerRuntime: runtime, triggerUsage: sample.usage,
         originalTurnId: runtime.activeTurnId, contextEpoch: sample.usage.contextEpoch,
         handoffPath: join(target.cwd, '.cooperation', 'handoffs', target.client, target.id, id + '.md'),
         receiptHashes: { handoff: receiptHash(stageTokens.handoff), restored: receiptHash(stageTokens.restored) },
         deadlineAt: deadline(stageTimeout[state]), controlDispatched: false });
       // Tokens are private to this local service, never returned by a management API.
-      this.store.setSetting('cycle-tokens:' + id, stageTokens); return created;
+      this.store.setSetting('cycle-tokens:' + id, stageTokens);
+      if (replaceCycle) this.store.updateCycle(replaceCycle.id, 'cancelled', { supersededByCycleId: id,
+        reason: '用户选择按当前进度继续维护，旧交付与回执已保留。' });
+      return created;
     });
     this.onUpdate(target); await this.advance(cycle.id); return this.store.cycle(cycle.id);
   }
@@ -124,7 +140,10 @@ export class MaintenanceController {
     this.onUpdate(cycle.session); return updated;
   }
   waitForClient(cycle, reason = '客户端暂不可用，等待重新连接后自动核对接续。') {
-    if (cycle.state === 'waiting_client') return;
+    if (cycle.state === 'waiting_client') {
+      if (cycle.reason !== reason) { this.store.updateCycle(cycle.id, cycle.state, { reason }); this.onUpdate(cycle.session); }
+      return;
+    }
     this.store.updateCycle(cycle.id, 'waiting_client', { previousState: maintenanceStage(cycle), reason,
       disconnectedAt: new Date().toISOString(), remainingStageMs: Math.max(1000, Date.parse(cycle.deadlineAt) - Date.now()) || 1000 });
     this.onUpdate(cycle.session);
@@ -132,7 +151,7 @@ export class MaintenanceController {
   async recoverClient(cycle, sample) {
     const runtime = sample.runtime;
     if (runtime.activity !== 'idle') { this.waitForClient(cycle, '客户端已重连，等待当前轮次结束后核对接续。'); return; }
-    if (missingSelection(cycle.triggerRuntime, runtime)) { this.waitForClient(cycle, '等待客户端同步原模型、思考强度和权限选项，再核对接续。'); return; }
+    if (missingSelection(cycle.triggerRuntime, runtime)) { this.waitForClient(cycle, '等待客户端同步原模型设置，再核对接续。'); return; }
     const blocked = reason => {
       const current = this.store.cycle(cycle.id);
       if (current?.revision !== cycle.revision) return;
@@ -142,16 +161,15 @@ export class MaintenanceController {
     if ((cycle.session.client === 'opencode' ? runtime.sessionId !== cycle.session.id : runtime.sessionId?.toLowerCase() !== cycle.session.id.toLowerCase())
       || !runtime.cwd || normalizeDirectory(runtime.cwd) !== normalizeDirectory(cycle.session.cwd))
       return blocked('重连会话的 ID 或工作目录与原流程不一致。');
-    if (runtime.queuedNativeInputs > 0 || runtime.backgroundTasks > 0 || runtime.subagentHistoryPresent
+    if (runtime.queuedNativeInputs > 0 || runtime.backgroundTasks > 0 || hasPendingSubagents(runtime)
       || runtime.goalStatus === 'active' || runtime.pendingRequests > 0 || runtime.pendingClientControls > 0
       || runtime.pendingHostControls > 0 || runtime.unconfirmedSubmissions > 0 || runtime.capabilities?.automaticMaintenance === false)
       return blocked('重连后仍有原生队列、目标、权限请求或后台工作，需人工核对。');
-    for (const field of ['model', 'effort', 'permissionMode', 'agent']) {
+    for (const field of ['model', 'agent']) {
       const current = field === 'model' ? runtime.model || sample.usage?.model : runtime[field];
-      if (field === 'model' ? modelChanged(cycle.triggerRuntime.model, current) : cycle.triggerRuntime[field] != null && current != null && current !== cycle.triggerRuntime[field])
-        return blocked('重连后的模型、思考强度或权限选项已改变，需人工核对。');
+      if (field === 'model' ? selectedModelChanged(cycle.triggerRuntime, runtime, cycle.session.client) : cycle.triggerRuntime[field] != null && (current != null || runtime.selectionKnown?.includes(field)) && current !== cycle.triggerRuntime[field])
+        return blocked('重连后的模型或代理设置已改变，需人工核对。');
     }
-    if (!samePermissionSelection(cycle.triggerRuntime, runtime)) return blocked('重连后的原生权限选项已改变，需人工核对。');
     const evidence = await this.recoveryEvidence(cycle, sample, { root: this.root });
     if (evidence.cwd && normalizeDirectory(evidence.cwd) !== normalizeDirectory(cycle.session.cwd)) return blocked('原生历史工作目录与维护会话不一致。');
     const plan = restartPlan(cycle, evidence, { handoff: this.store.checkpoint(cycle.id, 'handoff'), restored: this.store.checkpoint(cycle.id, 'restored') });
@@ -182,13 +200,13 @@ export class MaintenanceController {
   }
   async recoverService(cycle, sample) {
     const runtime = sample.runtime, stage = maintenanceStage(cycle);
-    if (missingSelection(cycle.triggerRuntime, runtime)) { this.waitForClient(cycle, '等待客户端同步原模型、思考强度和权限选项，再核对接续。'); return; }
-    if (modelChanged(cycle.triggerRuntime.model, runtime.model) || !samePermissionSelection(cycle.triggerRuntime, runtime)
-      || ['effort', 'permissionMode', 'agent'].some(key => cycle.triggerRuntime[key] != null && runtime[key] != null && cycle.triggerRuntime[key] !== runtime[key])) {
+    if (missingSelection(cycle.triggerRuntime, runtime)) { this.waitForClient(cycle, '等待客户端同步原模型设置，再核对接续。'); return; }
+    if (selectedModelChanged(cycle.triggerRuntime, runtime, cycle.session.client)
+      || cycle.triggerRuntime.agent != null && runtime.agent != null && cycle.triggerRuntime.agent !== runtime.agent) {
       this.store.updateCycle(cycle.id, 'needs_attention', { previousState: stage, recoveryBlocked: true,
-        reason: '重连后的模型、思考强度或权限选项已改变，需人工核对。' }); return;
+        reason: '重连后的模型或代理设置已改变，需人工核对。' }); return;
     }
-    if (runtime.queuedNativeInputs || runtime.backgroundTasks || runtime.subagentHistoryPresent || runtime.goalStatus === 'active'
+    if (runtime.queuedNativeInputs || runtime.backgroundTasks || hasPendingSubagents(runtime) || runtime.goalStatus === 'active'
       || runtime.unconfirmedSubmissions || runtime.capabilities?.automaticMaintenance === false) return;
     if (active(runtime)) {
       const expected = stage === 'interrupting' ? cycle.originalTurnId : cycle.controlTurnId;
@@ -225,7 +243,8 @@ export class MaintenanceController {
   }
   async step(id) {
     let cycle = this.store.cycle(id);
-    if (this.closed || !cycle || terminal.has(cycle.state) && !restartCandidate(cycle)) return;
+    const watchQuota = c => confirmedCompactionFailure(c) || c.quotaWaiting;
+    if (this.closed || !cycle || terminal.has(cycle.state) && !restartCandidate(cycle) && !watchQuota(cycle)) return;
     if (!(await readAccessPolicy()).permits(cycle.session.cwd)) return;
     if (!['codex', 'claude', 'opencode'].includes(cycle.session.client)) return this.attention(cycle, '此客户端的自动维护尚未开放。', 'not_submitted');
     if (cycle.state === 'waiting_client' || restartCandidate(cycle)) {
@@ -234,15 +253,35 @@ export class MaintenanceController {
     }
     const sample = await this.monitor.sample(cycle.session);
     cycle = this.store.cycle(id);
-    if (!cycle || terminal.has(cycle.state) && !restartCandidate(cycle)) return;
+    if (!cycle || terminal.has(cycle.state) && !restartCandidate(cycle) && !watchQuota(cycle)) return;
     const state = sample.runtime;
+    if (watchQuota(cycle) && state.connected && ['claude', 'codex'].includes(cycle.session.client)) {
+      if (!(Date.now() < Date.parse(cycle.maintenanceQuota?.nextCheckAt))) {
+        let reading;
+        try { reading = await this.quotaRecovery.read(cycle.session, this.monitor.runtime(cycle.session)); }
+        catch { reading = { status: 'unknown', queriedAt: new Date().toISOString() }; }
+        if (this.closed || this.store.cycle(id)?.revision !== cycle.revision) return;
+        cycle = this.store.updateCycle(id, cycle.state, { maintenanceQuota: { ...reading, nextCheckAt: deadline(60000) } });
+        this.onUpdate(cycle.session);
+      }
+      if (terminal.has(cycle.state)) return;
+    }
     if (this.store.restartConfirmation?.blocks(cycle.session)) return;
+    if (accountQuotaBlocked(state) && !active(state) && !state.quota) {
+      if (!terminal.has(cycle.state)) this.store.updateCycle(id, cycle.state, {
+        accountQuotaWaiting: true, deadlineAt: deadline(stageTimeout[cycle.state] || 60000) });
+      return;
+    }
+    if (cycle.accountQuotaWaiting) cycle = this.store.updateCycle(id, cycle.state, { accountQuotaWaiting: false });
     if (state.requiresReopen) {
       this.store.updateCycle(id, 'needs_attention', { previousState: maintenanceStage(cycle), recoveryBlocked: true, reason: state.detail });
       this.onUpdate(cycle.session); return;
     }
-    if (state.quota || state.activity === 'quota_limited') {
+    if (state.connected && missingSelection(cycle.triggerRuntime, state)) { this.waitForClient(cycle, '正在同步当前模型设置，再核对接续。'); return; }
+    const quotaHandoff = cycle.quotaResumeHandoff && cycle.state === 'writing_handoff' && !cycle.controlDispatched;
+    if ((state.quota || state.activity === 'quota_limited') && !quotaHandoff) {
       this.store.updateCycle(id, 'needs_attention', { previousState: maintenanceStage(cycle), recoveryBlocked: true,
+        quotaWaiting: true,
         reason: '维护阶段因额度不足中断，已保留会话锁及排队消息；额度恢复后请核对当前阶段再继续。' });
       this.onUpdate(cycle.session); return;
     }
@@ -269,14 +308,10 @@ export class MaintenanceController {
       cycle = this.store.updateCycle(id, cycle.state, { deadlineAt: deadline(60000), lastControlObservedAt: new Date().toISOString() });
     }
     if (cycle.session.client === 'opencode' && (!state.capabilities?.automaticMaintenance || state.reverted)) return this.attention(cycle, '原生维护状态无法确认或会话已回滚。');
-    if (state.queuedNativeInputs > 0 || state.backgroundTasks > 0 || state.subagentHistoryPresent) return this.attention(cycle, '检测到原生队列、子agent或后台工作，停止自动推进。');
-    if (modelChanged(cycle.triggerRuntime.model, state.model)
+    if (state.queuedNativeInputs > 0 || state.backgroundTasks > 0 || hasPendingSubagents(state)) return this.attention(cycle, '检测到原生队列、子agent或后台工作，停止自动推进。');
+    if (selectedModelChanged(cycle.triggerRuntime, state, cycle.session.client)
       || cycle.session.client === 'opencode' && cycle.triggerRuntime.agent !== state.agent)
       return this.attention(cycle, '维护期间模型发生变化，请核对用户操作。');
-    if ((cycle.triggerRuntime.effort && state.effort && cycle.triggerRuntime.effort !== state.effort)
-      || !samePermissionSelection(cycle.triggerRuntime, state)
-      || (cycle.triggerRuntime.permissionMode && state.permissionMode && cycle.triggerRuntime.permissionMode !== state.permissionMode))
-      return this.attention(cycle, '维护期间思考强度或权限发生变化，请核对用户操作。');
     if (['writing_handoff', 'restoring', 'awaiting_handoff_end', 'awaiting_restore_end'].includes(cycle.state)
       && cycle.controlTurnId && active(state) && state.activeTurnId !== cycle.controlTurnId) {
       this.store.updateCycle(id, 'user_intervened', { previousState: cycle.state, reason: '检测到维护以外的新原生输入，已停止自动推进。' });
@@ -310,8 +345,17 @@ export class MaintenanceController {
           this.attention(cycle, '目标轮次已结束，但系统未收到阶段回执。请检查目标会话中的权限或执行结果。', 'failed');
         return;
       }
-      if (state.activity !== 'idle') return this.attention(cycle, '交付或恢复提示发送前出现了新的业务轮次。', 'not_submitted');
+      if (state.activity !== 'idle' && !(quotaHandoff && state.activity === 'quota_limited' && state.quota?.autoResume)) return this.attention(cycle, '交付或恢复提示发送前出现了新的业务轮次。', 'not_submitted');
       const stage = cycle.state === 'writing_handoff' ? 'handoff' : 'restored';
+      let quota;
+      if (quotaHandoff && state.quota) {
+        quota = await this.quotaRecovery.read(cycle.session, adapter);
+        if (this.closed || this.store.cycle(id)?.revision !== cycle.revision) return;
+        if (!freshAvailableQuota(quota)) {
+          this.store.updateCycle(id, 'needs_attention', { previousState: cycle.state, quotaWaiting: true,
+            maintenanceQuota: { ...quota, nextCheckAt: deadline(60000) }, reason: '额度尚未确认恢复，已保留新交付流程和排队消息。' }); return;
+        }
+      }
       const tokens = this.store.getSetting('cycle-tokens:' + id);
       if (!tokens?.[stage]) return this.attention(cycle, '维护阶段凭证不可用。', 'not_submitted');
       const messageId = cycle.session.client === 'opencode' ? nativeMessageId() : null;
@@ -324,7 +368,8 @@ export class MaintenanceController {
           retryHeadId: null, recoveryBoundary: null, lastReceiptIssue: null, controlIntentAt: new Date().toISOString(), controlPromptRevision: prompts.revision });
       });
       const prompt = stage === 'handoff' ? handoffPrompt(this.root, cycle, token, prompts.values) : restorePrompt(this.root, cycle, token, prompts.values);
-      const result = await adapter.sendControl(prompt, state, { requestId: cycle.controlRequestId, ...(messageId ? { messageId } : {}) });
+      const options = { requestId: cycle.controlRequestId, ...(messageId ? { messageId } : {}), ...(quota ? { quota } : {}) };
+      const result = quotaHandoff && state.quota ? await adapter.resumeQuota(prompt, state, options) : await adapter.sendControl(prompt, state, options);
       const current = this.store.cycle(id);
       this.store.updateCycle(id, current.state, { controlTurnId: result.activeTurnId || result.requestId || current.controlTurnId, controlResult: result });
       const awaitingNativeReceipt = cycle.session.client === 'opencode' && result.status === 'unknown' && messageId;
@@ -383,6 +428,40 @@ export class MaintenanceController {
     if (releaseMessages) await this.service.mailbox?.drain(sessionKey(cycle.session));
     this.onUpdate(cycle.session);
   }
+  assertActionCurrent(cycle) {
+    if (this.closed || this.running.has(cycle.id) || this.store.cycle(cycle.id)?.revision !== cycle.revision)
+      throw new Error('流程在核对期间发生变化，请刷新后重试。');
+    this.store.restartConfirmation?.assertAllowed(cycle.session);
+  }
+  async restartFromCurrent(id) {
+    const cycle = this.store.cycle(id);
+    if (!canRestartFromCurrent(cycle)) throw new Error('此阶段不能按当前进度重新开始；已发起的压缩必须先核对原结果。');
+    this.store.restartConfirmation?.assertAllowed(cycle.session);
+    (await readAccessPolicy()).assert(cycle.session.cwd);
+    const sample = await this.monitor.sample(cycle.session), runtime = sample.runtime;
+    this.assertActionCurrent(cycle);
+    const quotaResume = runtime.activity === 'quota_limited' && runtime.quota?.autoResume === true;
+    if (!runtime.connected || !['idle', ...(quotaResume ? ['quota_limited'] : [])].includes(runtime.activity) || runtime.activeTurnId) throw new Error('请等待原会话当前回复结束，再按当前进度继续维护。');
+    if (runtime.requiresReopen || runtime.selectionPending || runtime.quotaRestart?.pending || !runtime.model)
+      throw new Error(runtime.detail || '原会话已连接，模型设置仍未读取完成，请等待设置核对。');
+    if (runtime.sessionId !== cycle.session.id || !runtime.cwd || normalizeDirectory(runtime.cwd) !== normalizeDirectory(cycle.session.cwd))
+      throw new Error('当前原生会话或工作目录与维护目标不一致。');
+    if (runtime.pendingRequests || runtime.unconfirmedSubmissions || runtime.pendingClientControls || runtime.pendingHostControls)
+      throw new Error('原会话仍有待确认输入或权限请求，请处理完成后继续。');
+    if (runtime.compactionRequestId || runtime.controlPending || runtime.lastCompaction?.requestId === cycle.compactRequestId && runtime.lastCompaction?.status === 'completed')
+      throw new Error('原生压缩仍在进行或已经完成，请核对原结果。');
+    if (confirmedCompactionFailure(cycle) || quotaResume) {
+      const quota = await this.quotaRecovery.read(cycle.session, this.monitor.runtime(cycle.session));
+      this.assertActionCurrent(cycle);
+      if (!freshAvailableQuota(quota)) throw new Error(quota?.status === 'exhausted' ? '当前额度仍不足，系统会继续检测。' : '当前额度尚未确认可用，系统会继续检测。');
+      const now = await this.monitor.runtime(cycle.session).status();
+      this.assertActionCurrent(cycle);
+      if (now.instanceId !== runtime.instanceId || now.activityRevision !== runtime.activityRevision || now.activity !== runtime.activity)
+        throw new Error('核对额度期间原会话状态已改变，请刷新后继续。');
+    }
+    const policy = this.store.getPolicy(cycle.session) || cycle.policy;
+    return this.trigger(cycle.session, policy, { ...sample, decision: { trigger: 'manual', wasWorkingAtTrigger: false, quotaResume } }, { replaceCycle: cycle });
+  }
   async retry(id) {
     const cycle = this.store.cycle(id);
     if (cycle) this.store.restartConfirmation?.assertAllowed(cycle.session);
@@ -391,6 +470,7 @@ export class MaintenanceController {
     if (!['needs_attention', 'user_intervened'].includes(cycle?.state)
       || (!documentStage && !['not_submitted', 'failed'].includes(cycle.lastAttemptOutcome))) throw new Error('该操作结果仍不确定，不能自动重试。');
     const state = await this.monitor.runtime(cycle.session).status();
+    this.assertActionCurrent(cycle);
     if (state.activity !== 'idle') throw new Error('请先确认原生会话处于空闲状态。');
     if (cycle.previousState === 'compacting' && cycle.compactResult?.boundary) throw new Error('已观察到原生压缩边界，不能直接重复压缩，请核对原会话。');
     if (documentStage && this.store.checkpoint(id, cycle.previousState === 'writing_handoff' ? 'handoff' : 'restored')) throw new Error('该阶段已有回执，请核对原生轮次结束状态。');
@@ -408,16 +488,17 @@ export class MaintenanceController {
     if (!cycle || !['needs_attention', 'user_intervened'].includes(cycle.state) || this.running.has(id)) throw new Error('该流程当前无需核对恢复。');
     (await readAccessPolicy()).assert(cycle.session.cwd);
     const sample = await this.monitor.sample(cycle.session), runtime = sample.runtime;
+    this.assertActionCurrent(cycle);
+    if (missingSelection(cycle.triggerRuntime, runtime)) throw new Error('当前模型设置尚未同步，请等待核对完成。');
     if (runtime.connected && runtime.activity === 'idle' && runtime.instanceId !== cycle.triggerRuntime.instanceId) {
       await this.recoverClient(cycle, sample); return;
     }
     if (!runtime.connected || runtime.instanceId !== cycle.triggerRuntime.instanceId) throw new Error('请先重新连接原来的会话，再检查并继续。');
-    for (const field of ['model', 'effort', 'permissionMode', 'agent']) {
-      if (field === 'model' ? modelChanged(cycle.triggerRuntime.model, runtime.model) : cycle.triggerRuntime[field] != null && runtime[field] != null && cycle.triggerRuntime[field] !== runtime[field]) throw new Error('原生模型、思考强度或权限选项与触发时不一致。');
+    for (const field of ['model', 'agent']) {
+      if (field === 'model' ? selectedModelChanged(cycle.triggerRuntime, runtime, cycle.session.client) : cycle.triggerRuntime[field] != null && (runtime[field] != null || runtime.selectionKnown?.includes(field)) && cycle.triggerRuntime[field] !== runtime[field]) throw new Error('原生模型或代理设置与触发时不一致。');
     }
-    if (!samePermissionSelection(cycle.triggerRuntime, runtime)) throw new Error('原生权限选项与触发时不一致。');
     if (recoverableReceiptPause(cycle) && cycle.controlDispatched && cycle.controlTurnId === runtime.activeTurnId && active(runtime)
-      && !runtime.quota && !runtime.requiresReopen && !runtime.queuedNativeInputs && !runtime.backgroundTasks && !runtime.subagentHistoryPresent
+      && !runtime.quota && !runtime.requiresReopen && !runtime.queuedNativeInputs && !runtime.backgroundTasks && !hasPendingSubagents(runtime)
       && !runtime.unconfirmedSubmissions && ['writing_handoff', 'restoring'].includes(cycle.previousState)) {
       this.transition(cycle, cycle.previousState, { reason: null, recoveryBlocked: false, lastReceiptIssue: null });
       return; // Reopen the original turn's receipt gate; never send another prompt.
@@ -449,7 +530,7 @@ export class MaintenanceController {
       if (createHash('sha256').update(await readFile(filename)).digest('hex') !== cycle.documentHash) throw new Error('交付文档内容已改变。');
     }
     const current = this.store.cycle(id);
-    if (current.revision !== cycle.revision) throw new Error('流程在核对期间发生变化。');
+    this.assertActionCurrent(cycle);
     this.store.event('cycle_reconciled', { id, previousState: stage, nextState: next, observedAt: sample.observedAt });
     this.transition(current, next, { ...patch, reason: null, reconciliationAt: new Date().toISOString() });
     await this.advance(id);

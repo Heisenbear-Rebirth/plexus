@@ -7,6 +7,22 @@ import { StringDecoder } from 'node:string_decoder';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const stamp = value => Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
 export const maintenanceStage = cycle => cycle.state === 'waiting_client' || cycle.state === 'needs_attention' ? cycle.previousState : cycle.state;
+export function confirmedCompactionFailure(cycle) {
+  const result = cycle?.compactResult;
+  return Boolean(cycle?.session?.client === 'claude' && cycle.compactDispatched
+    && cycle.compactRequestId && result?.requestId === cycle.compactRequestId
+    && ['failed', 'not_compacted'].includes(result.status) && !result.boundary && !cycle.compactCompletedAt
+    && (!result.sessionId || result.sessionId === cycle.session.id)
+    && stamp(cycle.compactIntentAt) !== null && stamp(result.completedAt) !== null
+    && stamp(result.completedAt) >= stamp(cycle.compactIntentAt));
+}
+export function canRestartFromCurrent(cycle) {
+  if (cycle && ['needs_attention', 'user_intervened', 'waiting_client'].includes(cycle.state)
+    && cycle.previousState === 'compacting' && confirmedCompactionFailure(cycle)) return true;
+  return Boolean(cycle && ['needs_attention', 'user_intervened'].includes(cycle.state)
+    && ['writing_handoff', 'awaiting_handoff_end', 'compacting'].includes(cycle.previousState)
+    && !cycle.compactDispatched && !cycle.compactIntentAt && !cycle.compactRequestId && !cycle.compactResult && !cycle.compactCompletedAt);
+}
 export function restartCandidate(cycle) {
   return cycle.state === 'needs_attention' && !cycle.recoveryBlocked && (
     cycle.reason?.startsWith('原生客户端实例已经改变') || cycle.reason?.startsWith('服务重启')

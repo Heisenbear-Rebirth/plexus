@@ -54,3 +54,7 @@
 隔离 Chrome 验证了连接设置入口、已连接反馈、三步进度、主要恢复按钮、诊断复制、取消确认和 390px 布局，页面错误为 0。测试浏览器的资料、缓存和临时文件均保存在项目内，诊断复制使用页面内模拟剪贴板。
 
 项目本机证据：`.cooperation/verification/receipt-before-tests.txt`、`receipt-native-wrapper.txt`、`user-experience-full-tests.txt`、`user-experience-browser.json`、`user-experience-deployment.json`。
+
+## 重启恢复提示（2026-10-04）
+
+恢复页面先明确连接事实，再说明自动接续暂缓的具体原因和下一步。当前设置尚未读取时，提示缺少模型、权限模式或思考强度，并说明无需重复连接；运行旧接入时，明确要求重开同一个 Claude 面板以加载修复。已确认的重启接续单独显示，旧额度记录保留查询时间并标为待查询，连接说明页与会话卡片保持一致。

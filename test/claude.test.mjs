@@ -109,14 +109,19 @@ test(`Claude sender uses published peer auth, exact target and supplied text aga
   });
   const messageId = randomUUID();
   const text = '[From Codex test adapter]\nHere is a finding. No reply instruction has been added.';
-  const result = await sendClaudeMessage({ targetId: id, text, messageId, configDir: root });
+  const permissionClass = namespace ? 'bypass' : 'prompting'; let permissionReads = 0;
+  const deferred = await sendClaudeMessage({ targetId: id, text, messageId, configDir: root, readSenderPermissionClass: async () => null });
+  assert.equal(deferred.status, 'deferred'); assert.equal(deferred.notSubmitted, true); assert.equal(peers.size, 0);
+  const result = await sendClaudeMessage({ targetId: id, text, messageId, configDir: root,
+    readSenderPermissionClass: async () => { permissionReads++; return permissionClass; } });
   const timeout = setTimeout(() => rejectReceived(new Error('Local mock inbox did not receive the frames.')), 2000);
   const [auth, frame] = await received.finally(() => clearTimeout(timeout));
   assert.deepEqual(auth, { type: 'auth', token });
   assert.equal(frame.type, 'user');
   assert.equal(frame.session_id, id);
   assert.equal(frame.uuid, messageId);
-  assert.equal(frame.message.content, text);
+  assert.equal(frame.message.content, `<cross-session-message from-mode="${permissionClass}">\n${text}\n</cross-session-message>`);
+  assert.equal(permissionReads, 1);
   assert.equal(frame.from, undefined);
   assert.equal(frame.fromMode, undefined);
   assert.equal(result.status, 'submitted');
@@ -165,7 +170,7 @@ test('Windows LOCAL peer inbox retains key and process-lifetime checks', { skip:
 test('Claude sender rejects invalid, offline and oversized targets before transport', async (t) => {
   const root = await fixture(t);
   await assert.rejects(sendClaudeMessage({ targetId: 'not-an-id', text: 'hello', configDir: root }), { code: 'CLAUDE_INVALID_SESSION_ID' });
-  await assert.rejects(sendClaudeMessage({ targetId: randomUUID(), text: 'hello', configDir: root }), { code: 'CLAUDE_SESSION_OFFLINE' });
+  await assert.rejects(sendClaudeMessage({ targetId: randomUUID(), text: 'hello', configDir: root }), { code: 'CLAUDE_SESSION_OFFLINE', outcome: 'not_submitted' });
   await assert.rejects(sendClaudeMessage({ targetId: randomUUID(), text: 'x'.repeat(MAX_CLAUDE_MESSAGE_BYTES + 1), configDir: root }), { code: 'CLAUDE_MESSAGE_TOO_LARGE' });
   const id = randomUUID();
   await registry(root, id, path.join(root, 'workspace'), { messagingSocketPath: 'https://example.invalid/inbox' });

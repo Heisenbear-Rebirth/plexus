@@ -1,7 +1,7 @@
 import { setupPromptEditor } from './prompt-editor.mjs';
 import { setupRestartConfirmation } from './restart-confirmation.mjs';
 import { setupMotion, revealPanel, syncTabIndicator } from './ui-state.mjs';
-import { maintenanceView, maintenanceDiagnostic, quotaView } from './maintenance-view.mjs';
+let { maintenanceView, maintenanceDiagnostic, quotaView, peerDeliveryView, accountQuotaExhausted } = await import('./maintenance-view.mjs');
 import { addressOf, clientName, autoCompressEnabled, projectMembers, workspaceAddresses, messageMatches, validThresholds, PolicySaver, directoryConnection, connectionGuidance, sessionConnected, openCodeContextState, reconcileChildren } from './ui-state.mjs';
 const $ = id => document.getElementById(id);
 setupMotion();
@@ -9,7 +9,7 @@ const state = { config: null, bridge: null, online: true, mode: 'directories', d
   picks: { directories: null, custom: null }, selectedAddress: null, expanded: new Set(), known: new Set(), connectedOnly: false,
   tab: 'overview', messages: [], selectedMessage: null, messageRequest: 0, scope: '', discoveryBusy: false, closed: false,
   editors: new Map(), cards: new Map(), connectionHelp: null, groupDraft: null, directoryDraft: null, events: null, discoveryReady: false, discoveryError: null };
-const activities = { idle: '空闲', running: '工作中', quota_limited: '等待额度', waiting_permission: '等待权限', waiting_input: '等待答复', initializing: '初始化中', unloaded: '未加载', offline: '离线', unknown: '待确认' };
+const activities = { idle: '空闲', running: '工作中', quota_limited: '等待额度', recovery_pending: '接续暂缓', peer_pending: '等待消息接收', waiting_permission: '等待权限', waiting_input: '等待答复', initializing: '初始化中', unloaded: '未加载', offline: '离线', unknown: '待确认' };
 const delivery = { submitted: '已发送到会话', queued: '等待发送', pending: '发送中', unknown: '需要确认', failed: '发送失败', held: '已暂存' };
 const phases = { waiting_client: '等待客户端重连', interrupting: '正在暂停任务', writing_handoff: '保存交付文档', awaiting_handoff_end: '等待交付轮次结束', compacting: '正在压缩', restoring: '加载上文', awaiting_restore_end: '等待恢复轮次结束', needs_attention: '需要处理', user_intervened: '用户已介入', completed: '维护已完成', cancelled: '维护已取消' };
 const name = s => s.name || '未命名会话';
@@ -19,8 +19,18 @@ const currentProject = () => projects().find(p => p.id === state.picks[state.mod
 const projectName = p => state.mode === 'custom' ? p.name : p.label && p.label !== p.path ? p.label : p.path.replaceAll('\\','/').split('/').filter(Boolean).at(-1) || p.path;
 const members = () => projectMembers(currentProject(), state.sessions, state.mode);
 const currentSession = () => members().find(s => addressOf(s) === state.selectedAddress);
-const activity = s => s.missing ? 'offline' : s.monitoring?.runtime?.activity || (s.live ? 'initializing' : 'unknown');
+const activity = s => s.missing ? 'offline' : s.monitoring?.runtime?.connected && s.monitoring.runtime.quotaRestart?.pending ? 'recovery_pending'
+  : s.client === 'codex' && s.monitoring?.runtime?.activity === 'idle' && accountQuotaExhausted(s.monitoring.runtime) ? 'quota_limited'
+  : s.monitoring?.runtime?.activity === 'unknown' && s.monitoring.runtime.pendingPeerMessages > 0 && !s.monitoring.runtime.busy ? 'peer_pending'
+  : s.monitoring?.runtime?.activity || (s.live ? 'initializing' : 'unknown');
 const connected = s => !s.missing && sessionConnected(s, { directory: state.directories.find(d => d.id === s.directoryIds?.[0]), bridge: state.bridge, online: state.online });
+async function refreshMaintenanceView(revision = String(Date.now())) {
+  const next = await import('./maintenance-view.mjs?revision=' + encodeURIComponent(revision));
+  ({ maintenanceView, maintenanceDiagnostic, quotaView, peerDeliveryView, accountQuotaExhausted } = next);
+  // Replace display rules in the open page without losing prompt drafts,
+  // pending form edits, navigation or restart-consent selections.
+  for (const card of state.cards.values()) card.signature = null;
+}
 function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
 function setText(node, value) { const next=String(value??'');if(node.textContent!==next)node.textContent=next; }
 function projectIcon(custom, expanded) {
@@ -232,7 +242,7 @@ function buildCard(session){
   if(session.client==='opencode'){contextTitle=el('h3');contextHint=el('p','policy-hint');contextHint.setAttribute('role','status');controls.append(contextTitle,contextHint);}
   if(session.missing)for(const control of controls.querySelectorAll('input,button'))control.disabled=true;
   const extra=el('div','session-extra'),actions=el('div','session-actions'),cycle=el('div','cycle-controls');extra.setAttribute('aria-label','当前会话状态');extra.append(el('h3','status-eyebrow','当前状态'));
-  actions.append(button('查看连接','button',()=>showConnectionHelp(session.client,state.directories.find(d=>d.id===session.directoryIds?.[0])?.id)),button('更新状态','button',async e=>{const target=e.currentTarget;target.disabled=true;try{await post('/api/runtime',{address:key,native:true});await loadMonitoring();}catch(error){toast(error.message);}finally{target.disabled=false;}}));
+  actions.append(button('查看连接','button',()=>showConnectionHelp(session.client,state.directories.find(d=>d.id===session.directoryIds?.[0])?.id)),button('更新状态','button',async e=>{const target=e.currentTarget;target.disabled=true;try{await refreshMaintenanceView();await post('/api/runtime',{address:key,native:true});await loadMonitoring();}catch(error){toast(error.message);}finally{target.disabled=false;}}));
   if(session.missing)actions.lastChild.disabled=true;
   if(state.config.lifecycle&&session.client==='opencode'&&!connected(session))actions.append(button('连接此会话','button',()=>openLifecycle('connect',session.cwd,key)));
   extra.append(cycle,actions);card.append(extra,summary,controls);state.cards.set(key,{badge,amount,tokens,model,meter,freshness,toggle,fields,saveStatus,validation,retry,cycle,thresholdSettings,thresholdSummary,contextTitle,contextHint,signature:null});return card;
@@ -252,15 +262,19 @@ function refreshCards(){
     setText(card.saveStatus,({saved:'已保存',saving:'保存中…',editing:'编辑中',error:'保存失败'})[value.status]||'');card.saveStatus.className='save-status '+value.status;card.validation.hidden=!value.error;setText(card.validation,value.error||'');card.retry.hidden=value.status!=='error';
     setText(card.thresholdSummary,'空闲 '+value.draft.softPercent+'% · 优先 '+value.draft.hardPercent+'%');
     if(value.error&&!validThresholds(Number(value.draft.softPercent),Number(value.draft.hardPercent)))card.thresholdSettings.open=true;
-    const q=session.monitoring?.quotaRecovery,c=session.cycle,signature=JSON.stringify([c,session.lastCycle,session.queueCount,session.queueState,q,r?.quota,r?.quotaRestart,r?.requiresReopen,r?.activity,r?.connected,session.policy]);if(signature===card.signature)continue;card.signature=signature;const panel=el('div');
-    const quota=quotaView(session);
+    const q=session.monitoring?.quotaRecovery,c=session.cycle,signature=JSON.stringify([c,session.lastCycle,session.queueCount,session.queueState,session.monitoring?.restartConsent,q,r?.quota,r?.accountQuota,r?.quotaRestart,r?.peerDelivery,r?.pendingPeerMessages,r?.requiresReopen,r?.activity,r?.connected,r?.model,r?.effort,r?.permissionMode,r?.selectionPending,r?.selectionRead,r?.capabilities?.automaticMaintenance,r?.busy,session.policy]);if(signature===card.signature)continue;card.signature=signature;const panel=el('div');
+    const quota=quotaView(session),peer=peerDeliveryView(session);
     if(r?.requiresReopen&&!quota)panel.append(el('p','cycle-title','接入需要更新'),el('p','cycle-reason',r.detail));
     if(quota) {
       panel.append(el('p','cycle-title',quota.title),el('p','cycle-reason',quota.description));
+      if(quota.action)panel.append(el('p','quota-next-action',quota.action));
+      if(quota.consentLabel)panel.append(el('p','last-cycle',quota.consentLabel));
+      panel.append(el('p','last-cycle quota-current-status',quota.quotaStatus+(quota.quotaQueriedAt?' · '+(quota.quotaFresh?'查询于 ':'上次查询 ')+timestamp(quota.quotaQueriedAt,true):'')));
       if(quota.resetAt)panel.append(el('p','last-cycle','上次报告的额度重置时间 · '+timestamp(quota.resetAt,true)));
       if(quota.nextCheckAt)panel.append(el('p','last-cycle','下次检测 · '+timestamp(quota.nextCheckAt)));
     }
-    if(!quota&&!c&&!r?.requiresReopen){
+    if(peer&&!quota&&!c){panel.append(el('p','cycle-title',peer.title),el('p','cycle-reason',peer.description),el('p','quota-next-action',peer.action));}
+    if(!quota&&!peer&&!c&&!r?.requiresReopen){
       const blocked=autoCompressEnabled(session.policy)&&(r?.capabilities?.automaticMaintenance===false||session.monitoring?.decision?.action==='disabled');
       const title=!r?.connected?'等待原会话连接':blocked?'自动管理暂未就绪':activities[a]||'正在核对会话状态';
       const reason=!r?.connected?'打开原会话后可重新读取状态。':a==='waiting_permission'||a==='waiting_input'?'请在原会话中处理确认，完成后会继续。':blocked?contextState?.detail||session.monitoring?.decision?.reason||'当前原生状态尚不支持自动管理，请先核对原会话。':a==='unknown'?'正在核对原生状态，确认就绪后再继续自动管理。':autoCompressEnabled(session.policy)?'自动管理已开启，会按当前设置整理上下文并检测额度恢复。':'自动管理未开启，可在下方设置中开启。';
@@ -270,10 +284,11 @@ function refreshCards(){
     if(c){const view=maintenanceView(c,r),progress=el('ol','maintenance-progress');progress.setAttribute('aria-label','维护进度');
       view.stages.forEach((title,index)=>{const step=el('li',index<view.index?'complete':index===view.index?'current':'',title);if(index===view.index)step.setAttribute('aria-current','step');progress.append(step);});
       panel.append(el('p','cycle-title',view.title),el('p','cycle-reason',view.description));
+      if(view.actionHint)panel.append(el('p','last-cycle',view.actionHint));
       if(session.queueCount)panel.append(el('p','last-cycle',session.queueCount+' 条消息将在维护完成后发送。'));
       const run=(action,title)=>{const control=button(title,action===view.primary?.action?'button primary':'text-button',async e=>{const target=e.currentTarget;
         if(action.startsWith('cancel-')&&!await confirmRemoval('结束这次维护？',action==='cancel-release'?'停止后续整理，并发送等待中的消息。':'停止后续整理，等待中的消息会保留，可稍后发送。','结束维护'))return;
-        target.disabled=true;try{await post('/api/cycles/action',{id:c.id,action});await loadMonitoring();await loadMessages();toast('会话状态已检查');}catch(error){toast(error.message);}finally{target.disabled=false;}});control.dataset.renderKey='maintenance:'+c.id+':'+action;return control;};
+        target.disabled=true;try{await post('/api/cycles/action',{id:c.id,action});await loadMonitoring();await loadMessages();toast(action==='restart-current'?'已开始保存最新进度，之后继续整理上下文':'会话状态已检查');}catch(error){toast(error.message);}finally{target.disabled=false;}});control.dataset.renderKey='maintenance:'+c.id+':'+action;if(action===view.primary?.action)control.disabled=view.primary.disabled===true;return control;};
       if(view.primary)panel.append(run(view.primary.action,view.primary.label));
       panel.append(progress);
       const options=el('details','maintenance-options session-disclosure');options.dataset.renderKey='options:'+c.id;options.append(el('summary','','更多操作'));
@@ -343,7 +358,7 @@ async function loadSessions(force=false){
 let monitoringBusy=false;
 const restartConfirmation = setupRestartConfirmation({ post, toast });
 async function loadMonitoring(){if(state.closed||monitoringBusy)return;monitoringBusy=true;const restartRevision=restartConfirmation.revision();try{const result=await request('/api/monitoring',{signal:AbortSignal.timeout(8000)});if(state.closed)return;setServiceOnline(true);for(const sample of result.sessions){const s=state.sessions.find(s=>addressOf(s)===addressOf(sample.session));if(!s)continue;if((sample.policy?.revision||0)<(s.policy?.revision||0))sample.policy=s.policy;Object.assign(s,{monitoring:sample,policy:sample.policy,cycle:sample.cycle,lastCycle:sample.lastCycle,queueCount:sample.queueCount,queueState:sample.queueState});const value=state.editors.get(addressOf(s));if(value&&!value.editing&&!value.saver.running&&value.status!=='error'){value.draft=effective(s);value.saver.revision=s.policy?.revision||0;}}
-    if(result.bootId && result.bootId!==state.config.bootId)state.config=await request('/api/config');
+    if(result.bootId && result.bootId!==state.config.bootId){const config=await request('/api/config');await refreshMaintenanceView(config.bootId);state.config=config;}
     restartConfirmation.update(result,restartRevision);
     refreshCards();const navSig=JSON.stringify(state.sessions.map(s=>[addressOf(s),activity(s),connected(s)]));if(navSig!==state.navSig){state.navSig=navSig;renderNavigation();updateScope();}if(!state.selectedAddress)renderProjectOverview();if(state.connectionHelp)renderConnectionHelp();
   }catch{void checkServiceHealth();}finally{monitoringBusy=false;}}
@@ -412,7 +427,7 @@ $('mode-directories').addEventListener('click',()=>setMode('directories'));$('mo
 $('add-project').addEventListener('click',()=>state.mode==='custom'?openGroup():openDirectory());$('project-crumb').addEventListener('click',()=>{const p=currentProject();if(p)selectProject(p);});
 for(const tab of ['overview','messages'])$('tab-'+tab).addEventListener('click',()=>setTab(tab));
 document.querySelector('.workspace-tabs').addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const tab=e.key==='Home'?'overview':e.key==='End'?'messages':state.tab==='overview'?'messages':'overview';setTab(tab);$('tab-'+tab).focus();}});
-$('session-search').addEventListener('input',renderNavigation);$('refresh-all').addEventListener('click',async e=>{const target=e.currentTarget;target.disabled=true;try{await loadBridge(true);await loadSessions(true);}finally{target.disabled=false;}});
+$('session-search').addEventListener('input',renderNavigation);$('refresh-all').addEventListener('click',async e=>{const target=e.currentTarget;target.disabled=true;try{await refreshMaintenanceView();await loadBridge(true);await loadSessions(true);}catch(error){toast(error.message);}finally{target.disabled=false;}});
 $('collapse-all').addEventListener('click',()=>{for(const p of projects())state.expanded.delete(state.mode+':'+p.id);$('session-search').value='';remember();renderNavigation();});
 $('connected-only').addEventListener('click',()=>{state.connectedOnly=!state.connectedOnly;try{localStorage.setItem('cooperation-connected-only-v1',String(state.connectedOnly));}catch{}renderNavigation();if(!state.selectedAddress)renderProjectOverview();updateScope();});
 $('message-search').addEventListener('input',renderMessages);$('message-status').addEventListener('change',renderMessages);

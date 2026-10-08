@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { sendClaudeMessage } from '../adapters/claude.mjs';
 import { readAccessPolicy } from '../access-policy.mjs';
+import { receivedNativeQuota } from '../quota-state.mjs';
 
 // Controllers pass operation options; older callers pass the UUID directly.
 function controlRequestId(options) {
@@ -51,14 +52,16 @@ export class ClaudeRuntime {
   async status() {
     const state = await this.request('/status');
     if (state.instanceId !== this.record.instanceId || state.sessionId !== this.id) throw new Error('CLAUDE_INSTANCE_CHANGED');
-    const requiresReopen = state.capabilities?.quotaRecovery !== true || state.capabilities?.peerQuotaRecovery !== true || state.capabilities?.inputLifecycle !== true;
+    const restartUpgrade = Boolean(state.initialized && state.capabilities?.selectionRefresh !== true);
+    const requiresReopen = state.capabilities?.quotaRecovery !== true || state.capabilities?.peerQuotaRecovery !== true || state.capabilities?.inputLifecycle !== true || restartUpgrade;
     return { client: 'claude', ...state, requiresReopen, ...(requiresReopen ? {
       capabilities: { ...state.capabilities, automaticMaintenance: false },
-      detail: '当前 Claude 接入需要更新；请在当前任务结束后正常重开此面板一次，加载额度与排队状态修复。自动维护已暂停。',
+      detail: restartUpgrade ? 'Claude 已连接；当前面板的接入程序需要更新，以正确同步模型和思考设置。请在当前任务结束后重启该 Claude 连接，加载修复后自动核对。'
+        : '当前 Claude 接入需要更新；请在当前任务结束后正常重开此面板一次，加载额度与排队状态修复。自动维护已暂停。',
     } : {}) };
   }
   async context() { return this.request('/context?sessionId=' + encodeURIComponent(this.id)); }
-  async quota() { return (await this.request('/quota?sessionId=' + encodeURIComponent(this.id))).quota; }
+  async quota() { return receivedNativeQuota((await this.request('/quota?sessionId=' + encodeURIComponent(this.id))).quota); }
   async resumeQuota(text, expected, options) {
     if (expected.activity !== 'quota_limited' || !expected.quota?.autoResume) return { status: 'state_conflict' };
     return this.control('quota-resume', expected, { text, requestId: controlRequestId(options), canDispatch: options?.canDispatch });
@@ -72,7 +75,7 @@ export class ClaudeRuntime {
     return this.request('/' + kind, { sessionId: this.id, instanceId: now.instanceId, requestId,
       expectedTurnId: now.activeTurnId, expectedActivityRevision: now.activityRevision, ...(text === undefined ? {} : { text }) });
   }
-  async sendMessage(text, { kind = 'peer', expected, requestId = randomUUID() } = {}) {
+  async sendMessage(text, { kind = 'peer', expected, requestId = randomUUID(), readSenderPermissionClass } = {}) {
     if (kind === 'maintenance') {
       if (!expected || expected.activity !== 'idle') return { status: 'state_conflict' };
       return this.control('prompt', expected, { text, requestId });
@@ -100,12 +103,13 @@ export class ClaudeRuntime {
       prepared = true;
     }
     let result;
-    try { result = await this.sendPeer({ targetId: this.id, text, messageId: requestId }); }
+    try { result = await this.sendPeer({ targetId: this.id, text, messageId: requestId,
+      ...(readSenderPermissionClass ? { readSenderPermissionClass } : {}) }); }
     catch (error) {
       if (prepared && error.outcome === 'not_submitted') await observe('cancel').catch(() => {});
       throw error;
     }
-    if (prepared && result.status === 'failed') await observe('cancel').catch(() => {});
+    if (prepared && (result.status === 'failed' || result.notSubmitted === true)) await observe('cancel').catch(() => {});
     return { ...result, visibility, ...(!visibility.replayEnabled
       ? { detail: '本次使用普通 peer 通道；接收端尚未启用可见消息，请在工作结束后重新打开已接入的 Claude 面板。' } : {}) };
   }
@@ -121,8 +125,8 @@ export class ClaudeRuntime {
   close() {}
 }
 
-export async function sendVisibleClaudeMessage({ targetId, text, messageId } = {}) {
+export async function sendVisibleClaudeMessage({ targetId, text, messageId, readSenderPermissionClass } = {}) {
   const runtime = new ClaudeRuntime(targetId);
-  try { return await runtime.sendMessage(text, { kind: 'peer', requestId: messageId }); }
+  try { return await runtime.sendMessage(text, { kind: 'peer', requestId: messageId, readSenderPermissionClass }); }
   finally { runtime.close(); }
 }

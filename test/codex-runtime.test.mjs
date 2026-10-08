@@ -33,6 +33,18 @@ test('canonical runtime metadata drops all conversation text and classifies wait
   assert.equal(projectCodexState(source).activity, 'waiting_input');
   source.threadRuntimeStatus = { type: 'idle' }; assert.equal(projectCodexState(source).activity, 'unknown');
 });
+
+test('Codex completed historical agents no longer disable native automation, but new child work still does', async t => {
+  const h = await harness(t), source=state();
+  source.turnHistory.history.entitiesByKey.one.items=[
+    {id:'start',type:'subAgentActivity',agentThreadId:'child',kind:'started'},
+    {id:'done',type:'subAgentActivity',agentThreadId:'child',kind:'completed'},
+    {id:'wait',type:'collabAgentToolCall',tool:'wait',status:'completed',receiverThreadIds:[],agentsStates:{}}];
+  h.setState(source);let r=await h.runtime.status();
+  assert.equal(r.subagentHistoryPresent,true);assert.equal(r.subagentWorkPending,false);assert.equal(r.capabilities.automaticMaintenance,true);
+  source.turnHistory.history.entitiesByKey.one.items.push({id:'followup',type:'subAgentActivity',agentThreadId:'child',kind:'interacted'});
+  h.setState(source);r=await h.runtime.status();assert.equal(r.subagentWorkPending,true);assert.equal(r.capabilities.automaticMaintenance,false);
+});
 test('native visualization roots do not masquerade as a user permission change; other roots and policies remain significant', () => {
   const base = { approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', runtimeWorkspaceRoots: ['E:/Project'], sandboxPolicy: { type: 'workspaceWrite', writableRoots: ['E:/Project'], networkAccess: false } };
   const expanded = structuredClone(base);
@@ -49,12 +61,79 @@ test('compaction effort is separate from the user thread selection', () => {
   assert.equal(projectCodexState(s).effort, 'high'); assert.equal(projectCodexState(s).lastOperationEffort, 'minimal');
   s.latestThreadSettings.effort = 'low'; assert.equal(projectCodexState(s).effort, 'low');
 });
+
+test('Codex missing permission metadata remains unknown without replacing the native permission selection', async t => {
+  const s = state(); s.latestThreadSettings = { effort: null }; let r = projectCodexState(s);
+  assert.equal(r.effort, null); assert.equal(r.selectionKnown.includes('effort'), true); assert.equal(r.selectionPending, false);
+  s.currentPermissions = null; r = projectCodexState(s); assert.equal(r.permissionFingerprint, null); assert.equal(r.selectionPending, false);
+  assert.equal(evaluatePolicy({ runtime: { ...r, connected: true }, policy: { enabled: true, softPercent: 40, hardPercent: 55 }, usage: { usedTokens: 99, contextWindowTokens: 100 } }).action, 'trigger');
+  const h = await harness(t); h.setState(s); const expected = await h.runtime.status();
+  assert.equal((await h.runtime.sendControl('inherit actual native settings', expected)).status, 'submitted');
+  const request=h.requests.find(x=>x.method==='thread-follower-start-turn');assert.equal(request.params.turnStart.context.inheritThreadSettings,true);
+  assert.deepEqual(Object.keys(request.params.turnStart.request).sort(), ['input','threadId']);
+});
 test('workspaceWrite implicitly includes cwd; explicit materialization is equivalent without hiding other root changes', () => {
   const a = state(); a.currentPermissions = { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false } };
   const before = projectCodexState(a); a.currentPermissions.sandboxPolicy.writableRoots.push(a.cwd);
   const after = projectCodexState(a); assert.equal(before.permissionFingerprint, after.permissionFingerprint);
   assert.equal(samePermissionSelection({ permissionFingerprint: after.legacyPermissionFingerprints[1], permissionFingerprintBasis: 'permission-selection-excluding-native-visualization-root' }, after), true);
   a.currentPermissions.sandboxPolicy.writableRoots.push('E:/Other'); assert.equal(samePermissionSelection(before, projectCodexState(a)), false);
+});
+
+function automaticPermissions(cwd, reviewer = 'auto_review') {
+  return { activePermissionProfile: { id: ':workspace', extends: null }, approvalPolicy: 'on-request',
+    approvalsReviewer: reviewer, runtimeWorkspaceRoots: [cwd], sandboxPolicy: { type: 'workspaceWrite',
+      writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
+}
+
+test('desktop guardian and app-server auto-review names preserve the same permission selection', () => {
+  const s = state(); s.currentPermissions = automaticPermissions(s.cwd, 'guardian_subagent');
+  const before = projectCodexState(s);
+  assert.equal(s.currentPermissions.approvalsReviewer, 'guardian_subagent'); // Projection never changes the native selection.
+  s.currentPermissions.approvalsReviewer = 'auto_review';
+  const after = projectCodexState(s);
+  assert.equal(before.permissionFingerprint, after.permissionFingerprint);
+  assert.equal(samePermissionSelection(before, after), true);
+  assert.equal(samePermissionSelection(after, before), true);
+});
+
+test('both persisted v2 incident fingerprints match only the equivalent current reviewer selection', () => {
+  // Regression hashes for two representative workspaces; no conversation text or tokens.
+  for (const [cwd, guardian, auto] of [
+    ['E:/Projects/Cooperation', 'dda9835df1e6a6ec22cdcf4fc873759ad407677250bca96c9807f2188cd17d05', '1403cc6c7c6fbbd85fd5244aa31c5bcf715934fa7421d77ea081c80e73241cd1'],
+    ['C:/Work/ProjectB', 'e2be7d19b3ce9087fee88435c60f6ace741ea6ac6c6476fc09862122db25b66d', '59b3cce8911859db1cf9ecb9ba9266da59cf5915afe44e6d05e16c1b60247846'],
+  ]) {
+    const s = state(); s.cwd = cwd; s.currentPermissions = automaticPermissions(cwd);
+    const after = projectCodexState(s);
+    assert.equal(after.permissionFingerprint, auto);
+    for (const fingerprint of [guardian, auto]) {
+      const before = { permissionFingerprint: fingerprint, permissionFingerprintBasis: 'permission-selection-v2-implicit-workspace-root' };
+      assert.equal(samePermissionSelection(before, after), true);
+    }
+    assert.equal(samePermissionSelection({ permissionFingerprint: guardian, permissionFingerprintBasis: 'unrecognized' }, after), false);
+  }
+});
+
+test('reviewer alias compatibility preserves real reviewer, policy, profile, roots and sandbox changes', () => {
+  const s = state(); s.currentPermissions = automaticPermissions(s.cwd);
+  const initial = projectCodexState(s);
+  const before = { permissionFingerprint: 'dda9835df1e6a6ec22cdcf4fc873759ad407677250bca96c9807f2188cd17d05',
+    permissionFingerprintBasis: 'permission-selection-v2-implicit-workspace-root' };
+  for (const change of [
+    p => { p.approvalsReviewer = 'user'; }, p => { p.approvalsReviewer = 'unknown-reviewer'; },
+    p => { p.approvalPolicy = 'never'; }, p => { p.activePermissionProfile.id = 'custom-profile'; },
+    p => { p.sandboxPolicy = { type: 'dangerFullAccess' }; }, p => { p.sandboxPolicy.networkAccess = true; },
+    p => { p.sandboxPolicy.excludeTmpdirEnvVar = true; }, p => { p.sandboxPolicy.excludeSlashTmp = true; },
+    p => { p.sandboxPolicy.writableRoots.push('E:/Other'); }, p => { p.runtimeWorkspaceRoots.push('E:/Other'); },
+  ]) {
+    const altered = structuredClone(s); change(altered.currentPermissions);
+    const after = projectCodexState(altered);
+    assert.equal(samePermissionSelection(before, after), false);
+    assert.equal(samePermissionSelection(initial, after), false);
+  }
+  const v1 = { permissionFingerprint: initial.legacyPermissionFingerprints[3], permissionFingerprintBasis: 'permission-selection-excluding-native-visualization-root' };
+  assert.equal(samePermissionSelection(v1, initial), true);
+  assert.equal(samePermissionSelection({ ...v1, permissionFingerprintBasis: 'permission-selection-v2-implicit-workspace-root' }, initial), false);
 });
 
 async function harness(t) {
@@ -100,6 +179,11 @@ for (const order of ['manager-first', 'client-first']) test(`Codex IPC reconnect
   const target = { client: 'codex', id: sessionId, cwd: root };
   let used = 100;
   const native = state('idle', 'failed-before-restart'); native.cwd = root;
+  native.turnHistory.history.entitiesByKey.oldAgents = { turnId: 'completed-research', status: 'completed', items: [
+    {id:'old-start',type:'subAgentActivity',agentThreadId:'finished-child',kind:'started'},
+    {id:'old-completion',type:'subAgentActivity',agentThreadId:'finished-child',kind:'completed'},
+    {id:'old-wait',type:'collabAgentToolCall',tool:'wait',status:'completed',receiverThreadIds:[],agentsStates:{}}] };
+  native.turnHistory.history.islands[0].entries.unshift({value:'oldAgents'});
   Object.assign(native.turnHistory.history.entitiesByKey.one, { status: 'failed', error: { codexErrorInfo: 'usageLimitExceeded' } }); h.setState(native);
   const monitor = { runtime: () => h.runtime, close() {}, sample: async () => ({ runtime: await h.runtime.status(), usage: {}, decision: {} }) };
   const start = () => {
@@ -109,6 +193,7 @@ for (const order of ['manager-first', 'client-first']) test(`Codex IPC reconnect
   t.after(async () => { await controller.close(); store.close(); assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
   start(); store.savePolicy(target, { enabled: true, mode: 'automatic' }); await controller.tick();
   assert.equal(store.getSetting(quotaSettingKey(target)).state, 'waiting');
+  store.setSetting(quotaSettingKey(target), {...store.getSetting(quotaSettingKey(target)),resumeBound:false,blockedReason:'Historical subagent guard from previous version'});
   await controller.close(); store.close();
   if (order === 'client-first') { h.restartNative(); await new Promise(resolve => setTimeout(resolve, 30)); }
   store = await new ManagementStore(join(root, '.cooperation')).init(); start();
@@ -197,6 +282,29 @@ test('Codex dated mixed histories select the newer head and ignore older detache
   assert.equal(projectCodexState(s).quota, null); assert.equal(projectCodexState(s).activity, 'idle');
   s.turns[0].startedAt = 300;
   assert.equal(projectCodexState(s).latestTurn.id, 'old-failure'); assert.equal(projectCodexState(s).activity, 'quota_limited');
+});
+
+test('native systemError with a terminal usage-limit failure remains recoverable without confusing generic errors or live work', async t => {
+  const h = await harness(t), s = state();
+  s.threadRuntimeStatus = { type: 'systemError' };
+  const turn = s.turnHistory.history.entitiesByKey.one;
+  turn.status = 'failed'; turn.error = { codexErrorInfo: 'usageLimitExceeded' }; h.setState(s);
+  const limited = await h.runtime.status(); assert.equal(limited.activity, 'quota_limited');
+  assert.equal((await h.runtime.resumeQuota('resume verified quota failure', limited, { quota: { status: 'available', queriedAt: new Date().toISOString() } })).status, 'submitted');
+  turn.error.codexErrorInfo = 'internalServerError'; assert.equal(projectCodexState(s).activity, 'unknown');
+  turn.error.codexErrorInfo = 'usageLimitExceeded'; s.requests = [{ id: 'approval' }]; assert.equal(projectCodexState(s).activity, 'unknown');
+  s.requests = []; s.threadRuntimeStatus.activeFlags = ['waitingOnApproval']; assert.equal(projectCodexState(s).activity, 'waiting_permission');
+});
+
+test('account-only quota blocks native compaction and new controls without converting an idle head into a resumable failure', async t => {
+  const h = await harness(t); let used = 100;
+  h.runtime.accountQuota = { read: async () => ({ status: used === 100 ? 'exhausted' : 'available', queriedAt: new Date().toISOString() }) };
+  const idle = await h.runtime.status(); assert.equal(idle.activity, 'idle'); assert.equal(idle.quota, null);
+  assert.equal((await h.runtime.sendControl('must wait', idle)).status, 'state_conflict');
+  assert.equal((await h.runtime.compact(idle)).status, 'state_conflict');
+  assert.equal((await h.runtime.resumeQuota('must not wake completed work', idle, { quota: { status: 'available', queriedAt: new Date().toISOString() } })).status, 'state_conflict');
+  assert.equal(h.requests.filter(r => /start-turn|compact-thread/.test(r.method)).length, 0);
+  used = 10; assert.equal((await h.runtime.sendControl('authorized new work', await h.runtime.status())).status, 'submitted');
 });
 
 test('Codex IPC and manager poll an ambiguous limited head, wait for synchronization, then continue once with native settings', async t => {

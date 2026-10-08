@@ -42,6 +42,13 @@ export class RestartConfirmation {
     return this.save({ ...record, session: { ...record.session, ...session }, revision: record.revision + 1,
       status: 'pending', work: [...record.work, { key: workKey, label }] });
   }
+  resolveWork(session, workKey) {
+    const record = this.get(session);
+    if (!record || record.bootId !== this.bootId) return;
+    const work = record.work.filter(w => w.key !== workKey);
+    if (work.length === record.work.length) return;
+    return this.save({ ...record, work, revision: record.revision + 1, status: work.length ? record.status : 'resolved' });
+  }
   observe(session, runtime) {
     if (!this.wasRestart) return;
     const key = keyOf(session), first = !this.seen.has(key); this.seen.add(key);

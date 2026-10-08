@@ -9,7 +9,7 @@ export class ContextMonitor {
   constructor({ store, service, runtimeFactory, onUpdate = () => {} }) {
     this.store = store; this.service = service; this.onUpdate = onUpdate; this.clients = new Map(); this.readers = new Map();
     this.injectedRuntime = Boolean(runtimeFactory);
-    this.runtimeFactory = runtimeFactory || (session => createRuntime(session, { opencode: service.adapters?.opencode }));
+    this.runtimeFactory = runtimeFactory || service.runtimeFactory || (session => createRuntime(session, { opencode: service.adapters?.opencode }));
     this.inFlight = new Map(); this.discovered = []; this.discoveryAt = 0; this.discoverySignature = ''; this.closed = false;
     this.nextSampleAt = new Map(); this.nativeQueryAt = new Map();
   }
@@ -28,12 +28,17 @@ export class ContextMonitor {
       }
     }
     const result = new Map();
-    const sessions = [...this.discovered]; let index = 0;
+    // Pausing maintenance must not freeze its connection/settings display.
+    // Retain paused sessions even when native discovery temporarily omits them.
+    const paused = new Map(this.store.activeCycles().filter(c => ['needs_attention', 'user_intervened'].includes(c.state))
+      .map(c => [sessionKey(c.session), c.session]));
+    const sessions = [...new Map([...paused, ...this.discovered.map(s => [sessionKey(s), s])]).values()]; let index = 0;
     // Keep large directory sets from starting unbounded native operations.
     const worker = async () => {
       while (!this.closed && index < sessions.length) {
         const session = sessions[index++], key = sessionKey(session);
-        if (this.store.activeCycle(session)) continue;
+        const cycle = this.store.activeCycle(session);
+        if (cycle && !['needs_attention', 'user_intervened'].includes(cycle.state)) continue;
         if (Date.now() < (this.nextSampleAt.get(key) || 0)) { const cached = this.store.getSnapshot(session); if (cached) result.set(key, cached); continue; }
         const sample = await this.sample(session); result.set(key, sample);
         this.nextSampleAt.set(key, Date.now() + (sample.runtime.connected ? 1800 : 10000));

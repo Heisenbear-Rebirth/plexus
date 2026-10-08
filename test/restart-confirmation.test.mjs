@@ -37,6 +37,23 @@ for (const client of ['codex', 'claude', 'opencode']) test(`${client}: prior que
   h.queue(); await h.reboot(); assert.equal(h.store.claimNext(key), null); assert.equal(h.gate.list().length, 1);
 });
 
+for (const queued of [false, true]) test(`cancelling maintenance removes its obsolete restart confirmation ${queued ? 'while retaining queue consent' : 'without blocking future work'}`, async t => {
+  const h = await fixture(t);
+  const cycle = h.store.createCycle({ session: h.session, state: 'needs_attention', reason: '设置待确认', previousState: 'restoring' });
+  if (queued) h.queue();
+  await h.reboot(); const old = h.gate.list();
+  h.store.releaseCycle(cycle.id, { cancel: true, releaseMessages: false });
+  assert.equal(h.store.cycle(cycle.id).state, 'cancelled');
+  assert.deepEqual(h.gate.get(h.session).work.map(w => w.key), queued ? ['queue'] : []);
+  assert.equal(h.gate.blocks(h.session), queued);
+  assert.equal(h.gate.list().length, Number(queued));
+  assert.throws(() => h.decide('approve', old), /改变/);
+  if (queued) {
+    assert.equal(h.store.queueState(h.session).held, 1);
+    assert.equal(h.store.claimNext(sessionKey(h.session)), null);
+  }
+});
+
 test('consent is atomic, rejects stale boot/revision or duplicate selections, and does not authorize newly discovered work', async t => {
   const h = await fixture(t); h.queue(); await h.reboot(); const old = h.gate.list();
   h.gate.require(h.session, 'quota:new-failure', '额度恢复后继续');

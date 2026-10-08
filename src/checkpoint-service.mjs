@@ -3,8 +3,7 @@ import { join, relative, isAbsolute } from 'node:path';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { sessionKey } from './management-store.mjs';
 import { normalizeDirectory } from './directory-service.mjs';
-import { modelChanged } from './model-identity.mjs';
-import { samePermissionSelection } from './runtime/codex-runtime.mjs';
+import { selectedModelChanged, missingSelectedSettings } from './model-identity.mjs';
 
 export const receiptHash = token => createHash('sha256').update(String(token)).digest('hex');
 function equalHash(a, b) { return typeof a === 'string' && typeof b === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b)); }
@@ -49,8 +48,7 @@ export class CheckpointService {
     if (!runtime.connected || runtime.instanceId !== cycle.triggerRuntime.instanceId || head !== cycle.controlTurnId
       || !['idle', 'running', 'waiting_permission', 'waiting_input'].includes(runtime.activity)
       || runtime.queuedNativeInputs > 0 || runtime.unconfirmedSubmissions > 0 || runtime.quota
-      || modelChanged(cycle.triggerRuntime.model, runtime.model) || !samePermissionSelection(cycle.triggerRuntime, runtime)
-      || ['effort', 'permissionMode'].some(key => cycle.triggerRuntime[key] != null && runtime[key] != null && cycle.triggerRuntime[key] !== runtime[key])
+      || missingSelectedSettings(cycle.triggerRuntime, runtime) || selectedModelChanged(cycle.triggerRuntime, runtime, cycle.session.client)
       || cycle.session.client === 'opencode' && source?.nativeUserMessageId !== head) throw stateError(cycle, 'CHECKPOINT_NATIVE_TURN_CHANGED');
   }
   async acceptReceipt({ from, cycleId, stage, receiptToken, documentPath }, source) {

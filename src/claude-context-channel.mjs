@@ -1,27 +1,52 @@
 import { randomUUID } from 'node:crypto';
 import { publicNativeContext } from './context-usage.mjs';
 import { publicClaudeQuota } from './quota-state.mjs';
+import { knownModel } from './model-identity.mjs';
+
+export function publicClaudeSelection(value) {
+  const applied = value?.applied;
+  // get_settings also contains raw files and environment values. Keep only
+  // the native process's applied model and effort; never return that payload.
+  return { model: knownModel(applied?.model), ...(applied && Object.hasOwn(applied, 'effort')
+    && (applied.effort === null || typeof applied.effort === 'string' && /^[a-z0-9_-]{1,32}$/i.test(applied.effort)
+      || Number.isFinite(applied.effort)) ? { effort: applied.effort } : {}) };
+}
 
 // Responses to our own read-only requests must not leak into the IDE SDK's
 // request map. Every other line is forwarded byte-for-byte, including CRLF.
 export class NativeContextChannel {
-  constructor(write, canQuery) { this.write = write; this.canQuery = canQuery; this.requests = new Map(); this.buffer = Buffer.alloc(0); this.passthrough = false; this.active = false; }
+  constructor(write, canQuery, { timeoutMs = 15000 } = {}) {
+    this.write = write; this.canQuery = canQuery; this.timeoutMs = timeoutMs; this.requests = new Map();
+    this.buffer = Buffer.alloc(0); this.passthrough = false; this.active = false;
+    this.namespace = randomUUID(); this.sequence = 0;
+  }
+  owns(id) {
+    if (typeof id !== 'string') return false;
+    for (const kind of ['context', 'interrupt']) {
+      const prefix = `cooperation-${kind}-${this.namespace}-`;
+      if (id.startsWith(prefix)) { const suffix = id.slice(prefix.length); return /^[1-9]\d*$/.test(suffix) && Number(suffix) <= this.sequence; }
+    }
+    return false;
+  }
   async query() {
     return this.request('get_context_usage');
   }
   async interrupt() { return this.request('interrupt'); }
   async quota() { return this.request('get_usage'); }
+  async selection() { return this.request('get_settings'); }
   async request(subtype) {
     if (this.active || this.requests.size >= 32 || !this.canQuery(subtype)) throw new Error('The session is not at an available input boundary.');
     this.active = true;
-    const requestId = `cooperation-${subtype === 'interrupt' ? 'interrupt' : 'context'}-${randomUUID()}`;
+    const requestId = `cooperation-${subtype === 'interrupt' ? 'interrupt' : 'context'}-${this.namespace}-${++this.sequence}`;
     this.currentRequestId = requestId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (subtype !== 'interrupt') { this.active = false; this.currentRequestId = null; }
         const request = this.requests.get(requestId);
         if (request) { request.expired = true; request.reject(Object.assign(new Error('Native control request timed out; outcome unknown.'), { outcome: 'unknown' })); }
-      }, 15000);
+        // A failed read cannot consume a permanent slot. The channel namespace
+        // still identifies late replies after their promise has been removed.
+        if (subtype !== 'interrupt') { this.requests.delete(requestId); this.active = false; this.currentRequestId = null; }
+      }, this.timeoutMs);
       this.requests.set(requestId, { resolve, reject, timer, expired: false, subtype });
       try { this.write(Buffer.from(JSON.stringify({ type: 'control_request', request_id: requestId,
         request: { subtype, ...(subtype === 'get_usage' ? { skip_behaviors: true } : {}) } }) + '\n')); }
@@ -46,10 +71,11 @@ export class NativeContextChannel {
         if (!owned.expired) {
           if (message.response.subtype === 'success') owned.resolve(owned.subtype === 'interrupt'
             ? { stillQueuedIds: Array.isArray(message.response.response?.still_queued) ? message.response.response.still_queued.filter(id => typeof id === 'string') : [] }
-            : owned.subtype === 'get_usage' ? publicClaudeQuota(message.response.response) : publicNativeContext(message.response.response));
+            : owned.subtype === 'get_usage' ? publicClaudeQuota(message.response.response)
+            : owned.subtype === 'get_settings' ? publicClaudeSelection(message.response.response) : publicNativeContext(message.response.response));
           else owned.reject(Object.assign(new Error('Claude rejected the native control request.'), { outcome: 'failed' }));
         }
-      } else forward(line);
+      } else if (!(message?.type === 'control_response' && this.owns(message.response?.request_id))) forward(line);
       this.passthrough = false;
     }
   }

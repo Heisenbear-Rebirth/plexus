@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ManagementStore } from '../src/management-store.mjs';
@@ -9,6 +9,7 @@ import { CheckpointService } from '../src/checkpoint-service.mjs';
 import { MaintenanceController } from '../src/maintenance-controller.mjs';
 import { PromptSettings } from '../src/prompt-settings.mjs';
 import { defaultPromptValues } from '../public/prompt-templates.mjs';
+import { projectCodexState } from '../src/runtime/codex-runtime.mjs';
 
 async function harness(t, wasWorking = false, delayedInterrupt = false, recoveryEvidence, client = 'claude') {
   const root = await mkdtemp(join(resolve('.'), '.maintenance-test-'));
@@ -25,6 +26,10 @@ async function harness(t, wasWorking = false, delayedInterrupt = false, recovery
     async sendControl(text) { const id = 'control-' + (++count); state.activity = 'running'; state.activeTurnId = id; if (client === 'codex') state.latestTurn = { id, status: 'inProgress' }; delivered.push(text); return { status: 'submitted', activeTurnId: id, requestId: id }; },
     async interrupt() { interruptCount++; if (!delayedInterrupt) { state.activity = 'idle'; state.lastCompletedTurnId = state.activeTurnId; state.activeTurnId = null; } return { status: 'acknowledged' }; },
     async compact() { compactCount++; usage.contextEpoch++; usage.usedTokens = 100; state.lastCompletedTurnId = 'compact-' + compactCount;
+      if (client === 'codex') {
+        usage.lastCompactionAt = new Date().toISOString(); usage.recordedTurnState = 'task_complete';
+        state.latestTurn = { id: state.lastCompletedTurnId, status: 'completed', itemTypes: ['contextCompaction'] };
+      }
       return { status: 'completed', requestId: state.lastCompletedTurnId, completedAt: new Date().toISOString(), boundary: { trigger: 'manual' } }; }, close() {},
   };
   const monitor = { sample: async () => ({ runtime: structuredClone(state), usage: { ...usage }, decision: { trigger: wasWorking ? 'hard' : 'soft', wasWorkingAtTrigger: wasWorking } }), runtime: () => runtime, close() {} };
@@ -77,6 +82,44 @@ test('receipt rejects a different session, wrong stage, wrong token and changed 
   assert.equal(h.store.activeCycle(h.target).id, cycle.id);
 });
 
+for (const client of ['claude', 'codex']) test(`${client}: effort and permission changes after compaction preserve restore receipts and FIFO without another compact`, async t => {
+  const h = await harness(t, false, false, undefined, client), id=h.cycle.id;
+  await mkdir(dirname(h.cycle.handoffPath), { recursive: true }); await writeFile(h.cycle.handoffPath, 'Preserved progress');
+  await h.receipt('handoff'); h.endTurn(); await h.controller.advance(id); await h.controller.advance(id);
+  const queued = await h.service.mailbox.send({ id: randomUUID(), createdAt: new Date().toISOString(), from: { ...h.target, client: client==='claude'?'codex':'claude' }, to: h.target, text: 'release only after restore' });
+  Object.assign(h.state, { effort: 'low', permissionMode: 'new-native-mode', permissionFingerprint: 'new-native-fingerprint' });
+  await h.controller.advance(id); await h.controller.advance(id); assert.equal(h.store.cycle(id).state,'restoring');
+  assert.equal(h.state.permissionMode,'new-native-mode'); assert.equal(h.compactCount(),1);
+  await h.receipt('restored'); assert.equal(h.store.getMessage(queued.id).status,'queued'); h.endTurn();await h.controller.advance(id);
+  assert.equal(h.store.cycle(id).state,'completed'); assert.equal(h.delivered.filter(x=>x==='release only after restore').length,1);assert.equal(h.compactCount(),1);
+});
+
+for (const late of [false, true]) test(`Codex reviewer alias after compaction accepts ${late ? 'a verified late' : 'the original'} restore receipt and releases FIFO once`, async t => {
+  const h = await harness(t, false, false, undefined, 'codex'); const id = h.cycle.id;
+  const projected = projectCodexState({ id: h.target.id, cwd: h.root, currentPermissions: {
+    activePermissionProfile: { id: ':workspace', extends: null }, approvalPolicy: 'on-request', approvalsReviewer: 'auto_review',
+    runtimeWorkspaceRoots: [h.root], sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false },
+  } });
+  const selection = Object.fromEntries(Object.entries(projected).filter(([key]) => /PermissionFingerprints|permissionFingerprint/.test(key)));
+  Object.assign(h.state, selection);
+  h.store.updateCycle(id, h.cycle.state, { triggerRuntime: { ...h.cycle.triggerRuntime,
+    permissionFingerprint: projected.legacyPermissionFingerprintsV2[1], permissionFingerprintBasis: 'permission-selection-v2-implicit-workspace-root' } });
+  await mkdir(dirname(h.cycle.handoffPath), { recursive: true }); await writeFile(h.cycle.handoffPath, 'Saved Codex context');
+  await h.receipt('handoff'); h.endTurn(); await h.controller.advance(id); await h.controller.advance(id);
+  await h.controller.advance(id); await h.controller.advance(id);
+  assert.equal(h.store.cycle(id).state, 'restoring'); assert.equal(h.compactCount(), 1);
+  const queued = await h.service.mailbox.send({ id: randomUUID(), createdAt: new Date().toISOString(), from: { ...h.target, client: 'claude' }, to: h.target, text: 'queued-after-maintenance' });
+  assert.equal(queued.status, 'queued');
+  if (late) h.controller.attention(h.store.cycle(id), '维护阶段超时；会话锁及排队消息已保留。');
+  assert.equal((await h.receipt('restored')).status, 'accepted');
+  assert.equal((await h.receipt('restored')).duplicate, true);
+  assert.equal(h.delivered.includes('queued-after-maintenance'), false);
+  h.endTurn(); await h.controller.advance(id); await h.controller.advance(id);
+  assert.equal(h.store.cycle(id).state, 'completed');
+  assert.equal(h.delivered.filter(text => text === 'queued-after-maintenance').length, 1);
+  assert.equal(h.compactCount(), 1);
+});
+
 test('quota failure inside handoff retains its lock and queued messages without compression, generic resume or timeout retry', async t => {
   const h = await harness(t); const cycle = h.store.cycle(h.cycle.id);
   h.state.activity = 'quota_limited'; h.state.quota = { turnId: h.state.activeTurnId, autoResume: true }; h.state.activeTurnId = null;
@@ -86,6 +129,22 @@ test('quota failure inside handoff retains its lock and queued messages without 
   assert.match(h.store.cycle(cycle.id).reason, /额度不足/); assert.equal(h.compactCount(), 0);
   assert.equal(h.store.activeCycle(h.target).id, cycle.id);
   await h.controller.advance(cycle.id); assert.equal(h.delivered.length, 1);
+});
+
+test('account-only exhaustion pauses the next Codex maintenance operation and resumes that stage once capacity returns', async t => {
+  const h = await harness(t, false, false, undefined, 'codex'); const id = h.cycle.id;
+  await mkdir(dirname(h.cycle.handoffPath), { recursive: true }); await writeFile(h.cycle.handoffPath, 'Saved before quota exhaustion');
+  await h.receipt('handoff'); h.endTurn(); await h.controller.advance(id);
+  assert.equal(h.store.cycle(id).state, 'compacting');
+  h.state.accountQuota = { status: 'exhausted', queriedAt: new Date().toISOString() };
+  h.store.updateCycle(id, 'compacting', { deadlineAt: '2000-01-01' });
+  await h.controller.advance(id); await h.controller.advance(id);
+  assert.equal(h.store.cycle(id).state, 'compacting'); assert.equal(h.store.cycle(id).accountQuotaWaiting, true);
+  assert.equal(h.compactCount(), 0); assert.equal(h.delivered.length, 1);
+  h.state.accountQuota = { status: 'available', queriedAt: new Date().toISOString() };
+  await h.controller.advance(id); await h.controller.advance(id); await h.controller.advance(id);
+  assert.equal(h.compactCount(), 1); assert.equal(h.store.cycle(id).state, 'restoring');
+  assert.equal(h.store.cycle(id).accountQuotaWaiting, false); assert.equal(h.delivered.length, 2);
 });
 
 for (const client of ['claude', 'codex']) test(`${client}: a maintenance turn still writing its handoff after ten minutes remains eligible to submit its receipt`, async t => {
@@ -118,6 +177,20 @@ test('late receipts still reject user intervention and expose token-free diagnos
   h.store.updateCycle(c.id, 'user_intervened', { previousState: 'writing_handoff' });
   h.state.activeTurnId = c.controlTurnId;
   await assert.rejects(h.receipt('handoff'), /维护已暂停/); assert.equal(h.store.checkpoint(c.id, 'handoff'), null);
+});
+
+test('late receipts ignore effort and permission changes but still reject pending settings and model changes', async t => {
+  const h = await harness(t); const c = h.store.cycle(h.cycle.id);
+  await mkdir(dirname(c.handoffPath), { recursive: true }); await writeFile(c.handoffPath, 'Existing progress');
+  h.store.updateCycle(c.id, c.state, { triggerRuntime: { ...c.triggerRuntime, effort: 'high' } });
+  h.controller.attention(h.store.cycle(c.id), '维护阶段超时；会话锁及排队消息已保留。');
+  Object.assign(h.state, { model: 'fixed[1m]', modelSelectionSource: 'native-settings', effort: 'high', selectionPending: true });
+  await assert.rejects(h.receipt('handoff'), error => error.code === 'CHECKPOINT_NATIVE_TURN_CHANGED');
+  h.state.selectionPending = false; h.state.effort = null; h.state.selectionKnown = ['effort'];
+  h.state.permissionMode = 'changed';
+  h.state.model = 'different-model';
+  await assert.rejects(h.receipt('handoff'), error => error.code === 'CHECKPOINT_NATIVE_TURN_CHANGED');
+  h.state.model = 'fixed[1m]'; assert.equal((await h.receipt('handoff')).status, 'accepted'); assert.equal(h.delivered.length, 1);
 });
 
 test('an unaccepted backup from a rejected receipt cannot block a later valid document', async t => {
@@ -153,6 +226,143 @@ test('explicitly retrying a stage rotates its receipt credential so delayed olde
   await mkdir(dirname(c.handoffPath), { recursive: true }); await writeFile(c.handoffPath, 'Existing original work');
   await assert.rejects(h.checkpoints.accept({ from: h.target, cycleId: c.id, stage: 'handoff', receiptToken: oldToken, documentPath: c.handoffPath }), /凭证不匹配/);
   assert.equal((await h.receipt('handoff')).status, 'accepted');
+});
+
+for (const action of ['retry', 'reconcile', 'restartFromCurrent']) test(`cancelling while ${action} awaits native state cannot resurrect a cancelled cycle`, async t => {
+  const h = await harness(t); const id = h.cycle.id;
+  if (action === 'retry') h.endTurn();
+  h.controller.attention(h.store.cycle(id), '维护阶段超时；会话锁及排队消息已保留。');
+  let reached, release;
+  const started = new Promise(resolve => { reached = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const owner = action === 'retry' ? h.runtime : h.controller.monitor;
+  const method = action === 'retry' ? 'status' : 'sample', original = owner[method];
+  owner[method] = async (...args) => { const state = await original(...args); reached(); await gate; return state; };
+  const work = h.controller[action](id);
+  await started; await h.controller.cancel(id, false); release();
+  await assert.rejects(work, /流程.*变化|已结束/);
+  assert.equal(h.store.cycle(id).state, 'cancelled'); assert.equal(h.store.activeCycle(h.target), null);
+  assert.equal(h.store.getSetting('cycle-tokens:' + id), null);
+  assert.equal(h.delivered.length, 1); assert.equal(h.compactCount(), 0);
+});
+
+test('explicit continue from current progress replaces a pre-compaction pause, preserves old receipt and keeps FIFO locked until the new restore ends', async t => {
+  const h = await harness(t, false, false, undefined, 'codex'); const old = h.cycle;
+  await mkdir(dirname(old.handoffPath), { recursive: true }); await writeFile(old.handoffPath, 'Earlier accepted context');
+  await h.receipt('handoff'); const oldReceipt = h.store.checkpoint(old.id, 'handoff'); h.endTurn();
+  h.controller.attention(h.store.cycle(old.id), '重启后检测到维护之外的新输入，需人工核对。');
+  Object.assign(h.state, { instanceId: 'new-native-instance', lastCompletedTurnId: 'new-user-turn', latestTurn: { id: 'new-user-turn', status: 'completed' } });
+  const queued = await h.service.mailbox.send({ id: randomUUID(), createdAt: new Date().toISOString(), from: { ...h.target, client: 'claude' }, to: h.target, text: 'retained message' });
+  const next = await h.controller.restartFromCurrent(old.id);
+  assert.notEqual(next.id, old.id); assert.equal(next.supersedesCycleId, old.id); assert.equal(next.state, 'writing_handoff');
+  assert.equal(next.triggerRuntime.instanceId, 'new-native-instance'); assert.equal(next.wasWorkingAtTrigger, false);
+  assert.equal(h.store.cycle(old.id).state, 'cancelled'); assert.equal(h.store.cycle(old.id).supersededByCycleId, next.id);
+  assert.deepEqual(h.store.checkpoint(old.id, 'handoff'), oldReceipt); assert.equal(await readFile(old.handoffPath, 'utf8'), 'Earlier accepted context');
+  assert.notEqual(next.handoffPath, old.handoffPath); assert.equal(h.store.getSetting('cycle-tokens:' + old.id), null);
+  await h.service.mailbox.flush(); assert.equal(h.store.getMessage(queued.id).status, 'queued'); assert.equal(h.compactCount(), 0);
+  await assert.rejects(h.controller.restartFromCurrent(old.id), /此阶段不能/);
+  const receipt = stage => h.checkpoints.accept({ from: h.target, cycleId: next.id, stage,
+    receiptToken: h.store.getSetting('cycle-tokens:' + next.id)[stage], documentPath: next.handoffPath });
+  await writeFile(next.handoffPath, 'Fresh context including the later input');
+  await receipt('handoff'); h.endTurn();
+  await h.controller.advance(next.id); await h.controller.advance(next.id); await h.controller.advance(next.id); await h.controller.advance(next.id);
+  assert.equal(h.compactCount(), 1); assert.equal(h.store.cycle(next.id).state, 'restoring');
+  await receipt('restored'); await h.service.mailbox.flush(); assert.equal(h.store.getMessage(queued.id).status, 'queued');
+  h.endTurn(); await h.controller.advance(next.id);
+  assert.equal(h.store.cycle(next.id).state, 'completed'); assert.equal(h.delivered.filter(text => text === 'retained message').length, 1);
+  assert.equal(h.delivered.filter(text => text === 'continue').length, 0); assert.equal(h.compactCount(), 1);
+});
+
+test('continue from current progress cannot replace an active task or a cycle with a compact intent', async t => {
+  const h = await harness(t); h.controller.attention(h.store.cycle(h.cycle.id), '等待用户核对');
+  const paused = h.store.cycle(h.cycle.id);
+  await assert.rejects(h.controller.restartFromCurrent(paused.id), /当前回复结束/);
+  assert.deepEqual(h.store.cycle(paused.id), paused); assert.equal(h.delivered.length, 1);
+  h.endTurn();
+  h.store.updateCycle(paused.id, 'needs_attention', { previousState: 'compacting', compactIntentAt: new Date().toISOString() });
+  await assert.rejects(h.controller.restartFromCurrent(paused.id), /压缩.*原结果/);
+  assert.equal(h.store.activeCycle(h.target).id, paused.id); assert.equal(h.compactCount(), 0);
+});
+
+test('replacement creation failure atomically restores the old maintenance lock, tokens and queue', async t => {
+  const h = await harness(t); h.endTurn(); h.controller.attention(h.store.cycle(h.cycle.id), '等待用户核对');
+  const old = h.store.cycle(h.cycle.id), tokens = h.store.getSetting('cycle-tokens:' + old.id);
+  const create = h.store.createCycle; h.store.createCycle = () => { throw Error('fixture database conflict'); };
+  await assert.rejects(h.controller.restartFromCurrent(old.id), /database conflict/); h.store.createCycle = create;
+  assert.deepEqual(h.store.cycle(old.id), old); assert.deepEqual(h.store.getSetting('cycle-tokens:' + old.id), tokens);
+  assert.equal(h.store.activeCycle(h.target).id, old.id); assert.equal(h.delivered.length, 1);
+});
+
+for (const limited of [false, true]) test(`confirmed failed compaction recovers from ${limited ? 'a quota-limited' : 'a reopened idle'} session with fresh progress, one compact and FIFO release`, async t => {
+  const h = await harness(t); const old = h.cycle;
+  await mkdir(dirname(old.handoffPath), { recursive: true }); await writeFile(old.handoffPath, 'Old accepted progress');
+  await h.receipt('handoff'); h.endTurn(); const saved = h.store.checkpoint(old.id, 'handoff');
+  const at = new Date().toISOString();
+  h.store.updateCycle(old.id, 'waiting_client', { previousState: 'compacting', compactDispatched: true, compactIntentAt: at,
+    compactRequestId: 'failed-compact', compactResult: { requestId: 'failed-compact', status: 'not_compacted', completedAt: at } });
+  Object.assign(h.state, { instanceId: 'new-owner', lastCompletedTurnId: 'failed-compact', ...(limited ? { activity: 'quota_limited',
+    quota: { kind: 'five_hour', turnId: 'failed-compact', autoResume: true } } : {}) });
+  let quota = 'exhausted', resumes = 0;
+  h.runtime.quota = async () => ({ status: quota, queriedAt: new Date().toISOString() });
+  h.runtime.resumeQuota = async (...args) => { resumes++; h.state.quota = null; return h.runtime.sendControl(...args); };
+  h.store.restartConfirmation = { blocks: () => true, assertAllowed() {} };
+  await h.controller.advance(old.id); // Query is read-only, even before restart consent.
+  assert.equal(h.store.cycle(old.id).maintenanceQuota.status, 'exhausted');
+  assert.equal(h.delivered.length, 1); assert.equal(h.compactCount(), 0);
+  await assert.rejects(h.controller.restartFromCurrent(old.id), /额度仍不足/);
+  quota = 'unknown'; await assert.rejects(h.controller.restartFromCurrent(old.id), /尚未确认可用/);
+  quota = 'available'; h.store.restartConfirmation = null;
+  const queued = await h.service.mailbox.send({ id: randomUUID(), createdAt: at, from: { ...h.target, client: 'codex' }, to: h.target, text: 'retained-after-quota' });
+  const next = await h.controller.restartFromCurrent(old.id);
+  assert.equal(next.state, 'writing_handoff'); assert.equal(resumes, Number(limited)); assert.equal(h.compactCount(), 0);
+  assert.deepEqual(h.store.checkpoint(old.id, 'handoff'), saved); assert.equal(await readFile(old.handoffPath, 'utf8'), 'Old accepted progress');
+  const receipt = stage => h.checkpoints.accept({ from: h.target, cycleId: next.id, stage,
+    receiptToken: h.store.getSetting('cycle-tokens:' + next.id)[stage], documentPath: next.handoffPath });
+  await writeFile(next.handoffPath, 'New progress'); await receipt('handoff'); h.endTurn();
+  for (let i = 0; i < 4; i++) await h.controller.advance(next.id);
+  assert.equal(h.compactCount(), 1); assert.equal(h.store.cycle(next.id).state, 'restoring');
+  await receipt('restored'); await h.service.mailbox.flush(); assert.equal(h.store.getMessage(queued.id).status, 'queued');
+  h.endTurn(); await h.controller.advance(next.id); await h.service.mailbox.flush();
+  assert.equal(h.store.cycle(next.id).state, 'completed'); assert.equal(h.delivered.filter(x => x === 'retained-after-quota').length, 1);
+  await assert.rejects(h.controller.restartFromCurrent(old.id)); assert.equal(h.compactCount(), 1);
+});
+
+test('failed-compaction restart rejects late success, missing settings, new input during quota check and cancelled work', async t => {
+  const h = await harness(t); h.endTurn(); const id = h.cycle.id, at = new Date().toISOString();
+  h.store.updateCycle(id, 'needs_attention', { previousState: 'compacting', compactDispatched: true, compactIntentAt: at,
+    compactRequestId: 'failure', compactResult: { requestId: 'failure', status: 'failed', completedAt: at } });
+  h.runtime.quota = async () => ({ status: 'available', queriedAt: new Date().toISOString() });
+  h.state.lastCompaction = { requestId: 'failure', status: 'completed' };
+  await assert.rejects(h.controller.restartFromCurrent(id), /已经完成/); h.state.lastCompaction = null;
+  h.state.model = null; await assert.rejects(h.controller.restartFromCurrent(id), /未读取完成/); h.state.model = 'fixed';
+  h.runtime.quota = async () => { h.state.activityRevision++; return { status: 'available', queriedAt: new Date().toISOString() }; };
+  await assert.rejects(h.controller.restartFromCurrent(id), /状态已改变/);
+  h.runtime.quota = async () => { await h.controller.cancel(id, false); return { status: 'available', queriedAt: new Date().toISOString() }; };
+  await assert.rejects(h.controller.restartFromCurrent(id), /流程.*变化/);
+  assert.equal(h.store.cycle(id).state, 'cancelled'); assert.equal(h.delivered.length, 1); assert.equal(h.compactCount(), 0);
+});
+
+test('Codex quota-paused handoff polls quota and passes a fresh reading to its native resume operation', async t => {
+  const h = await harness(t, false, false, undefined, 'codex'); h.endTurn();
+  Object.assign(h.state, { client: 'codex', activity: 'quota_limited', quota: { turnId: 'failed-turn', autoResume: true } });
+  h.store.updateCycle(h.cycle.id, 'needs_attention', { previousState: 'writing_handoff', quotaWaiting: true });
+  let reads = 0, resumes = 0; h.controller.quotaRecovery.read = async () => { reads++; return { status: 'available', queriedAt: new Date().toISOString() }; };
+  h.runtime.resumeQuota = async (text, state, options) => {
+    assert.equal(options.quota?.status, 'available'); assert.ok(Date.now() - Date.parse(options.quota.queriedAt) < 60000);
+    resumes++; h.state.quota = null; return h.runtime.sendControl(text, state);
+  };
+  await h.controller.advance(h.cycle.id); assert.equal(h.store.cycle(h.cycle.id).maintenanceQuota.status, 'available');
+  const next = await h.controller.restartFromCurrent(h.cycle.id);
+  assert.equal(next.state, 'writing_handoff'); assert.equal(resumes, 1); assert.ok(reads >= 3); assert.equal(h.compactCount(), 0);
+});
+
+test('waiting-client reasons follow settings and activity changes without resetting the saved stage deadline', async t => {
+  const h = await harness(t); h.endTurn();
+  h.controller.waitForClient(h.store.cycle(h.cycle.id)); const first = h.store.cycle(h.cycle.id);
+  h.controller.waitForClient(first, '等待客户端同步原模型、思考强度和权限选项，再核对接续。');
+  const next = h.store.cycle(first.id); assert.notEqual(next.reason, first.reason);
+  assert.equal(next.disconnectedAt, first.disconnectedAt); assert.equal(next.remainingStageMs, first.remainingStageMs);
+  h.controller.waitForClient(next, next.reason); assert.equal(h.store.cycle(first.id).revision, next.revision);
 });
 
 test('maintenance uses customized handoff, next-stage restore and continuation while preserving real checkpoint gates', async t => {
@@ -363,6 +573,14 @@ test('reopened maintenance waits for selected settings to arrive instead of trea
   assert.equal(h.store.cycle(h.cycle.id).state, 'waiting_client'); assert.equal(h.delivered.length, 1);
   h.state.model = 'fixed'; h.controller.recoveryPollAt.clear(); await h.controller.advance(h.cycle.id);
   assert.equal(h.store.cycle(h.cycle.id).controlDispatched, false);
+});
+
+for (const client of ['claude', 'codex']) test(`${client}: a changed or missing effort never blocks reconnecting the original maintenance turn`, async t => {
+  const h = await harness(t, false, false, async () => ({ verified: true, lastInputId: 'control-1' }), client);
+  h.store.updateCycle(h.cycle.id, 'writing_handoff', { triggerRuntime: { ...h.cycle.triggerRuntime, effort: 'high' } });
+  h.state.effort = null; h.state.selectionKnown = ['model', 'effort']; await reconnect(h);
+  assert.equal(h.store.cycle(h.cycle.id).state, 'writing_handoff'); assert.equal(h.store.cycle(h.cycle.id).controlDispatched, false);
+  assert.equal(h.delivered.length, 1);
 });
 test('a receipt arriving during recovery evidence read is not overwritten',async t=>{
   let accept;

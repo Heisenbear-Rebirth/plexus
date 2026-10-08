@@ -3,7 +3,8 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname, sep } from 'node:path';
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-const id = process.argv[process.argv.indexOf('--resume') + 1];
+const resumeArg = process.argv.find(arg => arg.startsWith('--resume='));
+const id = resumeArg ? resumeArg.slice(9) : process.argv[process.argv.indexOf('--resume') + 1];
 const emit = message => {
   if (process.env.COOP_FIXTURE_HISTORY && (['user', 'assistant'].includes(message.type) || message.type === 'system' && message.subtype === 'compact_boundary')) {
     if (!resolve(process.env.COOP_FIXTURE_HISTORY).startsWith(resolve('.') + sep)) throw Error('Fixture history left its workspace');
@@ -14,6 +15,7 @@ const emit = message => {
 };
 if (process.argv.includes('--show-args')) { emit({ args: process.argv.slice(2) }); process.exit(0); }
 let permissionRequest, checkpointRequest;
+let selectedEffort = 'high';
 const foldedInputs = [];
 async function quotaUtilization() {
   try { const value = JSON.parse(await readFile('quota-utilization.json', 'utf8')).value; if (Number.isFinite(value)) return value; } catch {}
@@ -21,6 +23,10 @@ async function quotaUtilization() {
 }
 createInterface({ input: process.stdin }).on('line', async line => {
   const message = JSON.parse(line);
+  if (message.type === 'fixture_peer_hold') {
+    emit({ type: 'system', subtype: 'peer_message_hold', session_id: id, message_uuid: message.uuid,
+      lane: 'socket', state: message.state, cause: message.cause, outcome: message.outcome, uuid: randomUUID() }); return;
+  }
   if (message.type === 'fixture_finish_folded_quota') {
     emit({ type: 'rate_limit_event', session_id: id, rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', utilization: 1 } });
     emit({ type: 'assistant', session_id: id, error: 'rate_limit', message: { model: '<synthetic>', content: [] } });
@@ -51,6 +57,15 @@ createInterface({ input: process.stdin }).on('line', async line => {
     emit({ type: 'result', subtype: 'success', is_error: false, session_id: id }); return;
   }
   if (message.type === 'control_request') {
+    if (message.request.subtype === 'apply_flag_settings' && Object.hasOwn(message.request.settings || {}, 'effort')) selectedEffort = message.request.settings.effort;
+    if (message.request.subtype === 'get_settings') {
+      emit({ type: 'fixture_settings_request' });
+      if (process.env.COOP_FIXTURE_SETTINGS_DELAY_MS) await new Promise(r => setTimeout(r, Number(process.env.COOP_FIXTURE_SETTINGS_DELAY_MS)));
+      emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {
+        applied: { model: process.env.COOP_FIXTURE_SELECTED_MODEL || 'fixture', effort: selectedEffort },
+        merged: { env: { PRIVATE_FIXTURE_TOKEN: 'must-not-leave-native-channel' } },
+      } } }); return;
+    }
     if (message.request.subtype === 'interrupt') {
       if (permissionRequest) { emit({ type: 'control_cancel_request', request_id: permissionRequest }); permissionRequest = null; }
       emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: { still_queued: [] } } });
@@ -69,7 +84,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
       return;
     }
     emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {} } });
-    emit({ type: 'system', subtype: 'init', session_id: id, ...(process.env.COOP_FIXTURE_MANAGER_PATH ? { model: 'fixture' } : {}) });
+    if (process.env.COOP_FIXTURE_DEFER_INIT !== '1') emit({ type: 'system', subtype: 'init', session_id: id, ...(process.env.COOP_FIXTURE_MANAGER_PATH ? { model: 'fixture' } : {}) });
   } else if (message.type === 'user') {
     emit({ ...message, fixtureReceivedExactly: true });
     const checkpoint = process.env.COOP_FIXTURE_MANAGER_PATH && /context_checkpoint：(\{[^\n]+\})/.exec(message.message.content);

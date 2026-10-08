@@ -3,8 +3,24 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
-import { restartPlan, readRestartEvidence, restartCandidate, controlTurnEnded } from '../src/maintenance-recovery.mjs';
+import { restartPlan, readRestartEvidence, restartCandidate, controlTurnEnded, canRestartFromCurrent, confirmedCompactionFailure } from '../src/maintenance-recovery.mjs';
 const id = randomUUID(), at = n => new Date(1700000000000 + n * 1000).toISOString();
+test('only a terminal negative result for the exact compact request permits a fresh maintenance cycle', () => {
+  const c = { session: { client: 'claude', id }, state: 'waiting_client', previousState: 'compacting', compactDispatched: true,
+    compactRequestId: 'request', compactIntentAt: at(10), compactResult: { status: 'not_compacted', requestId: 'request', completedAt: at(11) } };
+  assert.equal(confirmedCompactionFailure(c), true); assert.equal(canRestartFromCurrent(c), true);
+  for (const result of [{ status: 'unknown' }, { status: 'completed' }, { requestId: 'other' }, { boundary: { trigger: 'manual' } },
+    { completedAt: at(9) }, { completedAt: undefined }, { sessionId: 'other' }])
+    assert.equal(canRestartFromCurrent({ ...c, compactResult: { ...c.compactResult, ...result } }), false);
+  assert.equal(canRestartFromCurrent({ ...c, compactCompletedAt: at(11) }), false);
+});
+test('continue-from-current eligibility rejects every compact intent and post-compaction stage', () => {
+  const base = { state: 'needs_attention', previousState: 'awaiting_handoff_end' };
+  assert.equal(canRestartFromCurrent(base), true);
+  for (const patch of [{ state: 'cancelled' }, { previousState: 'restoring' }, { previousState: 'awaiting_restore_end' },
+    { compactDispatched: true }, { compactIntentAt: 'known' }, { compactRequestId: 'known' }, { compactResult: { status: 'unknown' } }, { compactCompletedAt: 'known' }])
+    assert.equal(canRestartFromCurrent({ ...base, ...patch }), false);
+});
 const cycle = (state, patch={}) => ({ id:randomUUID(),session:{client:'claude',id,cwd:resolve('.')},state,createdAt:at(0),
   triggerRuntime:{instanceId:'old'},controlTurnId:'control',controlDispatched:true,controlIntentAt:at(1),...patch });
 test('phase planning preserves completed receipts and resends only unfinished prompt stages',()=>{

@@ -10,6 +10,9 @@ export function connectionGuidance({ client, directory = null, status }) {
     steps: [{ title: '确认项目位置', text: '检查文件夹所在的磁盘是否已连接；项目移动后，请添加它的新位置。' }] };
   if (status.reason === 'claude_reopen') return { ...base, summary: 'Claude 已连接，更新将在重新打开后生效。',
     steps: [{ title: '在合适时机重新打开面板', text: '等当前任务结束后，重新打开这个项目的 Claude 面板。Cooperation 会自动识别，无需重复设置。' }] };
+  if (status.reason === 'claude_recovery') return { ...base, summary: 'Claude 已连接，自动接续暂缓。',
+    primary: { action: 'done', label: '明白了' },
+    steps: [{ title: '查看会话中的具体等待原因', text: '系统正在核对上次中断的任务和当前设置。连接已经建立，无需重复连接；是否需要操作会显示在会话状态中。' }] };
   if (status.reason === 'ready') return { ...base, summary: status.connected ? `${status.connected} 个会话已连接，可以正常使用。` : `${app} 已连接，可以正常使用。`,
     primary: { action: 'done', label: '完成' } };
   if (client === 'claude' && status.reason === 'claude_access') return { ...base, summary: '这个项目尚未允许 Claude 连接。',

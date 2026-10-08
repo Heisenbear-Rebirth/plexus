@@ -4,7 +4,7 @@ import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypt
 import { mkdir, readFile, writeFile, rename, unlink, appendFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JsonLineObserver, ClaudeProtocolState } from './claude-wrapper-state.mjs';
+import { JsonLineObserver, ClaudeProtocolState, launchOption } from './claude-wrapper-state.mjs';
 import { NativeContextChannel } from './claude-context-channel.mjs';
 import { PeerMessageVisibility } from './claude-peer-visibility.mjs';
 import { claudeDisplayLabel } from './prompt-settings.mjs';
@@ -29,12 +29,12 @@ try {
   peerHistoryVisibility = process.env.COOP_PEER_HISTORY_VISIBILITY !== '0'
     && (peerHistoryVisibility || config.peerHistoryVisibility === true);
   enabled = config.enabled === true && Array.isArray(config.directories) && config.directories.some(directory => normalize(directory) === normalize(process.cwd()))
-    && args.includes('stream-json') && args.includes('--input-format');
+    && launchOption(args, '--input-format') === 'stream-json';
 } catch { /* No project configuration means pure passthrough. */ }
 const child = spawn(binary, args, { cwd: process.cwd(), env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-const resumeAt = args.indexOf('--resume');
-const resumed = resumeAt >= 0 && /^[0-9a-f-]{36}$/i.test(args[resumeAt + 1] || '') ? args[resumeAt + 1].toLowerCase() : null;
-const state = new ClaudeProtocolState(resumed);
+const resumeArg = launchOption(args, '--resume');
+const resumed = /^[0-9a-f-]{36}$/i.test(resumeArg || '') ? resumeArg.toLowerCase() : null;
+const state = new ClaudeProtocolState(resumed, args);
 const quotaJournal = enabled ? new ClaudeQuotaJournal({ directory: join(dataDirectory, 'quota-state'), sessionId: resumed, cwd: process.cwd() }) : null;
 const instanceId = randomUUID();
 const token = randomBytes(32).toString('hex');
@@ -42,6 +42,8 @@ const registryFile = join(dataDirectory, 'instances', `${process.pid}-${instance
 let server, endpoint, pending, closing = false, writing = Promise.resolve(), lastSnapshot = '', lastCompaction = null;
 let controlPending = null, lastControl = null;
 let lastQuotaRead = null;
+let selectionReading = null, nextSelectionRead = 0;
+let selectionRead = null;
 const controlOperations = new Map();
 let registryTimer;
 const nativeUiInstanceId = /^[0-9a-f-]{36}$/.test(process.env.COOP_NATIVE_UI_INSTANCE_ID || '') ? process.env.COOP_NATIVE_UI_INSTANCE_ID : null;
@@ -51,12 +53,13 @@ let historyRestoreSession = null;
 const auditFile = join(dataDirectory, 'compactions.jsonl');
 const audit = event => appendFile(auditFile, JSON.stringify({ at: new Date().toISOString(), instanceId, ...event }) + '\n', 'utf8');
 function publicState() { return { ...state.publicState(), wrapperPid: process.pid, childPid: child.pid, instanceId, cwd: process.cwd(),
+  selectionRead,
   ...(quotaJournal?.pending ? { activity: state.activity() === 'idle' ? 'unknown' : state.activity(),
-    quotaRestart: { pending: true, reason: quotaJournal.reason } } : {}),
+    quotaRestart: { pending: true, stage: quotaJournal.stage, missingFields: quotaJournal.missingSelection(state), reason: quotaJournal.reason } } : {}),
   nativeUiInstanceId, nativeLifecycleOperationId,
   protocolVersion: 2, connected: !closing && !state.inputEnded, observedAt: new Date().toISOString(),
   capabilities: { readActivity: true, interrupt: true, sendControl: true, compact: true, observeCompletion: true, passiveUsage: true,
-    quotaRecovery: true, peerQuotaRecovery: true, inputLifecycle: true, restartRecovery: true,
+    quotaRecovery: true, peerQuotaRecovery: true, peerDeliveryLifecycle: true, inputLifecycle: true, restartRecovery: true, restartSelection: true, restartSelectionV2: true, selectionRefresh: true,
     hardAutomation: false, peerMessageVisibility: enabled && peerMessageVisibility, peerHistoryVisibility: enabled && peerMessageVisibility && peerHistoryVisibility },
   visibilityHistory,
   canCompact: Boolean(!quotaJournal?.pending && !pending && !controlPending && !contextChannel.active && state.canCompact(inputObserver.atBoundary)),
@@ -118,7 +121,28 @@ const outputObserver = new JsonLineObserver(message => {
 const startedAt = new Date().toISOString();
 const contextChannel = new NativeContextChannel(bytes => child.stdin.write(bytes), subtype => !pending &&
   (subtype === 'interrupt' ? state.initialized && state.active && !state.inputEnded && inputObserver.atBoundary
-    : !controlPending && (subtype === 'get_usage' ? state.canReadQuota(inputObserver.atBoundary) : state.canCompact(inputObserver.atBoundary))));
+    : !controlPending && (subtype === 'get_usage' ? state.canReadQuota(inputObserver.atBoundary)
+      : subtype === 'get_settings' ? state.canQuery(inputObserver.atBoundary) : state.canCompact(inputObserver.atBoundary))));
+function refreshRestartSelection() {
+  const needsSettings = () => state.selectionPending || !state.model || quotaJournal?.missingSelection(state).some(key => ['model', 'effort'].includes(key));
+  if (!state.sessionId || !needsSettings()
+    || selectionReading || contextChannel.active || !state.canQuery(inputObserver.atBoundary) || Date.now() < nextSelectionRead) return;
+  nextSelectionRead = Date.now() + 5000;
+  selectionRead = { state: 'reading', queriedAt: new Date().toISOString(), nextCheckAt: new Date(nextSelectionRead).toISOString() };
+  const revision = state.activityRevision, candidate = quotaJournal.candidate;
+  // Do not delay /status while native settings are being read: a slow read
+  // must not turn a connected client into a connection timeout in the UI.
+  selectionReading = (async () => {
+    try {
+      const selection = await contextChannel.selection();
+      if (closing || quotaJournal.candidate !== candidate || !needsSettings()
+        || state.activityRevision !== revision || !state.canQuery(inputObserver.atBoundary)) return;
+      quotaJournal.selectionError = !state.observeNativeSelection(selection);
+      selectionRead = { ...selectionRead, state: quotaJournal.selectionError ? 'unavailable' : 'ready' };
+      quotaJournal.nextRead = 0; await quotaJournal.restore(state); persist();
+    } catch { quotaJournal.selectionError = true; quotaJournal.nextRead = 0; selectionRead = { ...selectionRead, state: 'unavailable' }; persist(); }
+  })().finally(() => { selectionReading = null; });
+}
 process.stdin.on('data', chunk => { if (enabled) inputObserver.push(chunk); if (!child.stdin.destroyed && !child.stdin.write(chunk)) process.stdin.pause(); });
 child.stdin.on('drain', () => process.stdin.resume());
 process.stdin.on('end', () => { state.inputEnded = true; child.stdin.end(); persist(); });
@@ -189,7 +213,7 @@ async function control(kind, body) {
       && (state.activeTurnId ?? null) === (body.expectedTurnId ?? null);
     const available = () => !quotaJournal?.pending && !pending && !contextChannel.active && inputObserver.atBoundary && !state.inputEnded
       && (kind === 'interrupt' ? state.active && Boolean(body.expectedTurnId) && !state.backgroundTasks.size
-        : !controlPending && (kind === 'quota-resume'
+        : !state.selectionPending && !controlPending && (kind === 'quota-resume'
           ? state.quota?.autoResume && state.canQuery(inputObserver.atBoundary) && freshAvailableQuota(lastQuotaRead)
             && lastQuotaRead.activityRevision === state.activityRevision
           : state.canCompact(inputObserver.atBoundary)));
@@ -252,6 +276,7 @@ if (enabled) {
         if (!authorized(request)) return reply(response, 401, { error: 'Unauthorized' });
         const controlsEnabled = await directoryStillEnabled();
         if (request.method === 'GET' && request.url === '/status') {
+          refreshRestartSelection();
           await quotaJournal?.restore(state);
           const snapshot = publicState();
           return reply(response, 200, { ...snapshot, controlsEnabled,
@@ -265,7 +290,7 @@ if (enabled) {
             || body.sessionId !== state.sessionId || body.instanceId !== instanceId || !/^[0-9a-f-]{36}$/i.test(body.messageId || '')
             || !['prepare', 'cancel'].includes(body.action)) return reply(response, 400, { error: 'Invalid peer observation request.' });
           if (body.action === 'cancel') { state.forgetPeer(body.messageId); persist(); return reply(response, 200, { status: 'cancelled' }); }
-          if (quotaJournal?.pending) return reply(response, 200, { status: 'deferred', notSubmitted: true, reason: 'receiver_unavailable', detail: quotaJournal.reason });
+          if (quotaJournal?.pending || state.selectionPending) return reply(response, 200, { status: 'deferred', notSubmitted: true, reason: 'receiver_unavailable', detail: quotaJournal?.reason || '正在同步当前模型和思考设置，稍后自动重试。' });
           if (state.quota) return reply(response, 200, { status: 'deferred', notSubmitted: true, runtime: publicState() });
           state.expectPeer(body.messageId); persist(); return reply(response, 200, { status: 'ready' });
         }
@@ -277,6 +302,7 @@ if (enabled) {
         }
         if (request.method === 'GET' && request.url.startsWith('/quota?')) {
           if (new URL(request.url, 'http://127.0.0.1').searchParams.get('sessionId') !== state.sessionId) return reply(response, 409, { error: 'Wrong session.' });
+          await selectionReading;
           const revision = state.activityRevision;
           try {
             const quota = await contextChannel.quota();

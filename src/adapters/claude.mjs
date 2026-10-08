@@ -8,6 +8,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { readAccessPolicy } from '../access-policy.mjs';
+import { claudePeerEnvelope } from '../peer-permissions.mjs';
 
 const execFileAsync = promisify(execFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -18,7 +19,9 @@ export const MAX_CLAUDE_MESSAGE_BYTES = 256 * 1024;
 const TRANSPORT_TIMEOUT_MS = 8000;
 
 function fault(code, message) {
-  return Object.assign(new Error(message), { code });
+  // Thrown failures occur before transport submission. Once a write may have
+  // happened, writeFrames returns unknown rather than throwing this error.
+  return Object.assign(new Error(message), { code, outcome: 'not_submitted' });
 }
 
 function configPath(configDir) {
@@ -345,7 +348,7 @@ function writeFrames(endpoint, frames) {
   });
 }
 
-export async function sendClaudeMessage({ targetId, text, messageId = randomUUID(), configDir } = {}) {
+export async function sendClaudeMessage({ targetId, text, messageId = randomUUID(), configDir, readSenderPermissionClass } = {}) {
   if (typeof targetId !== 'string' || !UUID.test(targetId)) throw fault('CLAUDE_INVALID_SESSION_ID', 'A valid Claude session UUID is required.');
   if (typeof text !== 'string' || !text.trim()) throw fault('CLAUDE_EMPTY_MESSAGE', 'Message text must not be empty.');
   if (Buffer.byteLength(text, 'utf8') > MAX_CLAUDE_MESSAGE_BYTES) throw fault('CLAUDE_MESSAGE_TOO_LARGE', `Claude messages are limited to ${MAX_CLAUDE_MESSAGE_BYTES} UTF-8 bytes.`);
@@ -367,7 +370,17 @@ export async function sendClaudeMessage({ targetId, text, messageId = randomUUID
   }
   if (typeof key.peerToken !== 'string' || !/^[a-f0-9]{32}$/.test(key.peerToken)) throw fault('CLAUDE_PEER_KEY_INVALID', 'The selected Claude inbox authentication key is invalid.');
   await validateProcessLifetime(record, key);
-  const frame = { type: 'user', session_id: exactId, uuid: messageId, priority: 'next', message: { role: 'user', content: text } };
+  // Read the sender at dispatch, including for messages that waited in a queue.
+  // Never infer its permission class from the recipient or from message text.
+  let permissionClass = null;
+  try { if (typeof readSenderPermissionClass === 'function') permissionClass = await readSenderPermissionClass(); }
+  catch { throw fault('CLAUDE_SENDER_STATE_UNAVAILABLE', 'Could not verify the sender permission class before submission.'); }
+  if (typeof readSenderPermissionClass === 'function' && !['bypass', 'prompting'].includes(permissionClass))
+    return { status: 'deferred', notSubmitted: true, reason: 'sender_permissions_unknown',
+      detail: '尚未确认发送方的原生权限模式，消息保留在本地队列。若发送方是 OpenCode，请在任务结束后重启原生后端以加载权限声明修复。' };
+  const content = claudePeerEnvelope(text, permissionClass);
+  if (Buffer.byteLength(content, 'utf8') > MAX_CLAUDE_MESSAGE_BYTES) throw fault('CLAUDE_MESSAGE_TOO_LARGE', 'Claude peer message including its native envelope exceeds the size limit.');
+  const frame = { type: 'user', session_id: exactId, uuid: messageId, priority: 'next', message: { role: 'user', content } };
   const auth = JSON.stringify({ type: 'auth', token: key.peerToken });
   const payload = `${auth}\n${JSON.stringify(frame)}\n`;
   const status = await writeFrames(endpoint, payload);

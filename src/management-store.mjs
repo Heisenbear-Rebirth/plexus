@@ -7,6 +7,7 @@ import { POLICY_DEFAULTS, validatePolicy } from './context-policy.mjs';
 import { matchesDirectories, containsDirectory } from './directory-service.mjs';
 import { restartCandidate } from './maintenance-recovery.mjs';
 import { RestartConfirmation } from './restart-confirmation.mjs';
+import { accountQuotaBlocked } from './quota-state.mjs';
 
 const json = value => JSON.stringify(value);
 const parse = row => row ? JSON.parse(row.data) : null;
@@ -185,7 +186,7 @@ export class ManagementStore {
       if (this.restartConfirmation && !this.restartConfirmation.canDrain(key)) return null;
       const quota = this.getSetting('quota-recovery:' + key);
       const snapshot = parse(this.db.prepare('SELECT data FROM snapshots WHERE session_key=?').get(key));
-      if (snapshot?.runtime?.quota || ['waiting', 'sending', 'attention'].includes(quota?.state)) return null;
+      if (snapshot?.runtime?.quota || accountQuotaBlocked(snapshot?.runtime) || ['waiting', 'sending', 'attention'].includes(quota?.state)) return null;
       if (this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='held'").get(key)) return null;
       if (this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='sending'").get(key)) return null;
       const row = this.db.prepare("SELECT * FROM outbox WHERE target_key=? AND status='ready' ORDER BY priority,sequence LIMIT 1").get(key);
@@ -203,7 +204,7 @@ export class ManagementStore {
       const item = parse(row); if (item.kind !== 'message') throw new Error('仅普通消息可暂缓。');
       this.db.prepare("UPDATE outbox SET status='ready' WHERE id=?").run(id);
       this.update(item.messageId, { status: 'queued', detail: result.detail, error: null });
-      if (result.runtime?.quota && result.runtime.sessionId === item.to.id) {
+      if ((result.runtime?.quota || accountQuotaBlocked(result.runtime)) && result.runtime.sessionId === item.to.id) {
         const previous = this.getSnapshot(item.to);
         this.saveSnapshot(item.to, { ...previous, session: previous?.session || item.to, runtime: result.runtime,
           decision: { action: 'wait_quota', reason: result.detail }, observedAt: new Date().toISOString() });
@@ -260,7 +261,14 @@ export class ManagementStore {
           const item = parse(row); if (item.kind === 'message') this.update(item.messageId, { status: 'held', detail: '维护已取消；消息按用户选择保留，等待手动释放。' });
         }
       }
-      this.updateCycle(cycleId, cancel ? 'cancelled' : 'completed', { completedAt: now(), resumed: Boolean(resumeText) });
+      const snapshot = this.getSnapshot(cycle.session), runtime = snapshot?.runtime;
+      const observationAge = Date.now() - Date.parse(snapshot?.observedAt || runtime?.observedAt);
+      const cancelledDuringTurn = cancel && runtime?.connected && ['running','waiting_permission','waiting_input'].includes(runtime.activity)
+        && runtime.activeTurnId && runtime.instanceId && observationAge >= 0 && observationAge < 10000
+        ? { turnId: runtime.activeTurnId, instanceId: runtime.instanceId } : null;
+      this.updateCycle(cycleId, cancel ? 'cancelled' : 'completed', { completedAt: now(), resumed: Boolean(resumeText),
+        ...(cancelledDuringTurn ? { cancelledDuringTurn } : {}) });
+      this.restartConfirmation?.resolveWork(cycle.session, 'maintenance:' + cycleId);
       this.db.prepare('UPDATE mailboxes SET locked_cycle=NULL WHERE session_key=?').run(key); return cycle;
     });
   }

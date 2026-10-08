@@ -117,3 +117,19 @@ test('held messages prevent newer arrivals overtaking the retained queue', async
   assert.equal(f.store.getMessage(first.messageId).text, 'old'); f.store.finishOutbox(first.id, { status: 'submitted' });
   const second = f.store.claimNext(sessionKey(recipient)); assert.equal(f.store.getMessage(second.messageId).text, 'new');
 });
+
+test('ending an obsolete maintenance lock does not immediately interrupt the same live user turn', async t => {
+  const f = await storeFixture(t), session = { ...sender, cwd: f.dir };
+  const cycle = f.store.createCycle({ session, state: 'needs_attention', previousState: 'restoring' });
+  const runtime = { connected: true, activity: 'running', activeTurnId: 'current-human-turn', instanceId: 'original-owner',
+    latestTurn: { id: 'current-human-turn', status: 'inProgress' } };
+  f.store.saveSnapshot(session, { session, runtime, observedAt: new Date().toISOString() });
+  f.store.releaseCycle(cycle.id, { cancel: true, releaseMessages: false });
+  const lastCycle = f.store.cycle(cycle.id), policy = { enabled: true, softPercent: 40, hardPercent: 55 };
+  const args = { lastCycle, policy, usage: { usedTokens: 80, contextWindowTokens: 100 } };
+  assert.equal(f.store.activeCycle(session), null);
+  assert.equal(evaluatePolicy({ ...args, runtime }).action, 'wait');
+  assert.match(evaluatePolicy({ ...args, runtime }).reason, /当前回复完成后/);
+  assert.equal(evaluatePolicy({ ...args, runtime: { ...runtime, activity: 'idle', activeTurnId: null } }).action, 'trigger');
+  assert.equal(evaluatePolicy({ ...args, runtime: { ...runtime, activeTurnId: 'next-human-turn' } }).action, 'trigger');
+});

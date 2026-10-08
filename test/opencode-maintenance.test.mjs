@@ -79,6 +79,19 @@ async function fixture(t, { working = false } = {}) {
     hang: () => { hangCompact = true; }, release: () => releaseCompact?.() };
 }
 
+test('OpenCode runtime exposes only a verified peer mode from the selected agent and session rules', async t => {
+  const f = await fixture(t), old = f.client._client.get;
+  const rules = [{ permission: '*', pattern: '*', action: 'allow' }];
+  f.client._client.get = async args => args.url === '/agent' ? { data: [{ name: 'build', permission: rules, prompt: 'private-agent-prompt' }] } : old(args);
+  f.session.permission = [];
+  let state = await f.adapter.status(f.target.id); assert.equal(state.peerPermissionClass, 'bypass'); assert.equal(state.capabilities.peerPermissionSelection, true);
+  assert.doesNotMatch(JSON.stringify(state), /private-agent-prompt/);
+  f.session.permission = [{ permission: 'bash', pattern: '*', action: 'ask' }];
+  state = await f.adapter.status(f.target.id); assert.equal(state.peerPermissionClass, 'prompting');
+  f.client._client.get = async args => args.url === '/agent' ? { error: 'not available' } : old(args);
+  assert.equal((await f.adapter.status(f.target.id)).peerPermissionClass, null);
+});
+
 for (const working of [false, true]) test(`OpenCode ${working ? 'hard' : 'soft'} full maintenance uses native receipts, compacts once and resumes conditionally`, async t => {
   const f = await fixture(t, { working }), cycle = await f.begin(), id = cycle.id;
   await f.advanceTo(id, 'writing_handoff'); await f.manager.controller.advance(id);
@@ -234,18 +247,48 @@ test('OpenCode compaction epoch survives recent-history truncation and a later b
   assert.equal(sample.usage.contextEpoch, epoch); assert.equal(sample.decision.action, 'trigger');
 });
 
-test('OpenCode native permissions, children, revert and changed settings prevent maintenance controls', async t => {
+test('OpenCode native approval requests, children, revert and model changes still prevent maintenance controls', async t => {
   const f = await fixture(t), runtime = f.manager.monitor.runtime(f.target), state = await runtime.status();
   f.permission.push({ sessionID: f.target.id });
   assert.equal((await f.manager.monitor.sample(f.target)).decision.action, 'wait');
   assert.equal((await runtime.sendControl('must not run', state)).status, 'state_conflict'); f.permission.length = 0;
   f.children.push({ id: 'ses_ChildABC123' });
   assert.equal((await runtime.compact(state)).status, 'state_conflict'); f.children.length = 0;
-  f.session.model.variant = 'low';
+  f.session.model.id = 'different-model';
   assert.equal((await runtime.sendControl('must not run', state)).status, 'state_conflict');
-  f.session.model.variant = 'high'; f.session.revert = { messageID: f.rows[0].info.id };
+  f.session.model.id = 'actual'; f.session.revert = { messageID: f.rows[0].info.id };
   assert.equal((await runtime.compact(await runtime.status())).status, 'state_conflict');
   assert.equal(f.calls.length, 0); assert.equal(f.counts().compactions, 0);
+});
+
+test('OpenCode configuration changes between the first and final checks use the latest variant without overriding permissions', async t => {
+  const f = await fixture(t), runtime = f.manager.monitor.runtime(f.target), expected = await runtime.status();
+  f.session.model.variant = 'medium';
+  f.session.permission = [{ permission: '*', pattern: '*', action: 'allow' }];
+  assert.equal((await runtime.status()).activityRevision, expected.activityRevision);
+  assert.equal((await runtime.status()).capabilities.maintenanceSettingsLockFree, true);
+  const read = f.client._client.get; let changed = false;
+  f.client._client.get = async args => {
+    if (args.url === '/agent' && !changed) { changed = true; f.session.model.variant = 'low'; f.session.permission = [{ permission: 'bash', pattern: '*', action: 'ask' }]; }
+    return read(args);
+  };
+  assert.equal((await runtime.sendControl('inherit current settings', expected)).status, 'submitted');
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].variant, 'low');
+  assert.equal(f.calls[0].permission, undefined); assert.equal(f.calls[0].tools, undefined);
+  assert.deepEqual(f.session.permission, [{ permission: 'bash', pattern: '*', action: 'ask' }]);
+});
+
+test('OpenCode restores with changed effort and permissions after compaction, then releases queued work once', async t => {
+  const f = await fixture(t), c = await f.begin();
+  const queued = await f.manager.service.mailbox.send({ id: randomUUID(), createdAt: new Date().toISOString(), from: { ...f.target, client: 'codex' }, to: f.target, text: 'retained work' });
+  await f.receipt(c.id, 'handoff'); f.finish(650); await f.advanceTo(c.id, 'restoring');
+  f.session.model.variant = 'low'; f.session.permission = [{ permission: '*', pattern: '*', action: 'allow' }];
+  await f.manager.controller.advance(c.id); assert.equal(f.calls[1].variant, 'low');
+  assert.equal((await f.receipt(c.id, 'restored')).status, 'accepted');
+  assert.equal(f.manager.store.getMessage(queued.id).status, 'queued');
+  f.finish(100); await f.advanceTo(c.id, 'completed');
+  assert.equal(f.calls.length, 3); assert.equal(f.counts().compactions, 1);
+  assert.match(f.calls[2].parts[0].text, /retained work/); assert.equal(f.calls[2].variant, 'low');
 });
 
 test('OpenCode user input arriving before a native interrupt wins the revision check and is preserved', async t => {

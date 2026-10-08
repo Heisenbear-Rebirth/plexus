@@ -3,7 +3,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CodexIpc } from './codex-ipc.mjs';
 import { normalizeDirectory } from '../directory-service.mjs';
-import { codexQuotaFailure, freshAvailableQuota } from '../quota-state.mjs';
+import { codexQuotaFailure, freshAvailableQuota, accountQuotaBlocked } from '../quota-state.mjs';
+import { codexPeerPermissionClass } from '../peer-permissions.mjs';
+import { codexSubagentActivity, hasPendingSubagents } from '../codex-subagents.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex');
 const text = value => typeof value === 'string' ? value : null;
@@ -12,6 +14,9 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value &
 export function permissionSelection(permissions, sessionId, codexHome = process.env.CODEX_HOME || join(homedir(), '.codex'), cwd) {
   if (!permissions) return null;
   const selected = structuredClone(permissions);
+  // The desktop picker still emits the legacy name; app-server restores the
+  // same automatic reviewer as auto_review after compaction/resume.
+  if (selected.approvalsReviewer === 'guardian_subagent') selected.approvalsReviewer = 'auto_review';
   const root = normalizeDirectory(codexHome) + '/visualizations/';
   const nativeRoot = path => {
     const value = normalizeDirectory(path);
@@ -31,8 +36,17 @@ export function permissionSelection(permissions, sessionId, codexHome = process.
 export function samePermissionSelection(before, after) {
   if (!before.permissionFingerprint || !after.permissionFingerprint) return true;
   if (before.permissionFingerprint === after.permissionFingerprint) return true;
-  return before.permissionFingerprintBasis === 'permission-selection-excluding-native-visualization-root'
-    && after.legacyPermissionFingerprints?.includes(before.permissionFingerprint) === true;
+  if (before.permissionFingerprintBasis === 'permission-selection-excluding-native-visualization-root')
+    return after.legacyPermissionFingerprints?.includes(before.permissionFingerprint) === true;
+  return before.permissionFingerprintBasis === 'permission-selection-v2-implicit-workspace-root'
+    && after.permissionFingerprintBasis === 'permission-selection-v3-reviewer-alias'
+    && after.legacyPermissionFingerprintsV2?.includes(before.permissionFingerprint) === true;
+}
+function reviewerFingerprints(permissions) {
+  const fingerprints = [hash(permissions)];
+  if (permissions?.approvalsReviewer === 'auto_review')
+    fingerprints.push(hash(canonical({ ...permissions, approvalsReviewer: 'guardian_subagent' })));
+  return fingerprints;
 }
 function turnTime(turn) {
   const value = turn?.startedAt ?? turn?.createdAt ?? turn?.started_at;
@@ -70,7 +84,6 @@ export function projectCodexState(s) {
   const history = s.turnHistory?.kind === 'canonical' ? s.turnHistory.history : null;
   const canonical = history?.islands?.flatMap(island => island.entries?.map(entry => history.entitiesByKey?.[entry.value]) || []).filter(Boolean) || [];
   const legacy = Array.isArray(s.turns) ? s.turns : [];
-  const turns = [...canonical, ...legacy];
   // Historical in-progress turns cannot establish current activity. Mixed
   // snapshots must establish a chronological head before any native control.
   const head = currentTurnHead(canonical, legacy), currentTurns = head.candidates;
@@ -86,30 +99,38 @@ export function projectCodexState(s) {
   else if (!head.uncertain && s.threadRuntimeStatus?.type === 'idle' && activeIds.length === 0 && !s.requests?.length && !s.unconfirmedTurnSubmissions?.length
     && (!latest || ['completed', 'interrupted', 'failed'].includes(latest.status))) activity = 'idle';
   const quota = codexQuotaFailure(latest) || (head.uncertain ? currentTurns.map(codexQuotaFailure).find(Boolean) : null) || null;
-  if (activity === 'idle' && quota) activity = 'quota_limited';
+  if (quota && (activity === 'idle' || s.threadRuntimeStatus?.type === 'systemError' && !head.uncertain
+    && activeIds.length === 0 && flags.length === 0 && !s.requests?.length && !s.unconfirmedTurnSubmissions?.length)) activity = 'quota_limited';
   const model = text(s.latestModel) || text(s.latestCollaborationMode?.settings?.model);
   const effort = s.latestThreadSettings?.effort !== undefined ? text(s.latestThreadSettings.effort)
     : s.latestCollaborationMode?.settings?.reasoning_effort !== undefined ? text(s.latestCollaborationMode.settings.reasoning_effort) : text(s.latestReasoningEffort);
+  const selectionKnown = [
+    ...(model ? ['model'] : []),
+    ...(s.latestThreadSettings?.effort !== undefined || s.latestCollaborationMode?.settings?.reasoning_effort !== undefined ? ['effort'] : []),
+    ...(s.currentPermissions ? ['permissionFingerprint'] : []),
+  ];
   const permissions = permissionSelection(s.currentPermissions, s.id, undefined, s.cwd);
   const implicitCwd = structuredClone(permissions);
   if (implicitCwd?.sandboxPolicy?.type === 'workspaceWrite') implicitCwd.sandboxPolicy.writableRoots = implicitCwd.sandboxPolicy.writableRoots.filter(path => path !== normalizeDirectory(s.cwd));
   return { activity, quota, turnOrderUncertain: head.uncertain, activeTurnId: activeIds.length === 1 ? activeIds[0] : null,
-    subagentHistoryPresent: turns.some(turn => turn.items?.some(item => item.type === 'collabAgentToolCall')),
+    ...codexSubagentActivity(canonical, legacy),
     historicalInProgressTurns: canonical.slice(0, -1).filter(t => t.status === 'inProgress').length,
     pendingRequests: s.requests?.length || 0, runtimeStatus: text(s.threadRuntimeStatus?.type),
-    activeFlags: flags.filter(v => typeof v === 'string'), model, effort, lastOperationEffort: text(s.latestReasoningEffort),
+    activeFlags: flags.filter(v => typeof v === 'string'), model, effort, selectionKnown, selectionPending: !model, lastOperationEffort: text(s.latestReasoningEffort),
+    peerPermissionClass: codexPeerPermissionClass(s.currentPermissions),
     effortSource: s.latestThreadSettings?.effort !== undefined ? 'thread-settings' : s.latestCollaborationMode?.settings?.reasoning_effort !== undefined ? 'collaboration-settings' : 'latest-operation',
-    permissionFingerprint: hash(permissions), permissionFingerprintBasis: 'permission-selection-v2-implicit-workspace-root',
-    legacyPermissionFingerprints: [hash(permissions), hash(implicitCwd)], cwd: text(s.cwd),
+    permissionFingerprint: permissions ? hash(permissions) : null, permissionFingerprintBasis: 'permission-selection-v3-reviewer-alias',
+    legacyPermissionFingerprintsV2: reviewerFingerprints(permissions),
+    legacyPermissionFingerprints: [hash(permissions), hash(implicitCwd), ...reviewerFingerprints(permissions).slice(1), ...reviewerFingerprints(implicitCwd).slice(1)], cwd: text(s.cwd),
     goalStatus: text(s.threadGoal?.status), unconfirmedSubmissions: s.unconfirmedTurnSubmissions?.length || 0,
     latestTurn: latest ? { id: text(latest.turnId), status: text(latest.status),
       itemTypes: [...new Set(latest.items?.map(i => i.type).filter(v => typeof v === 'string') || [])] } : null };
 }
 
 export class CodexRuntime {
-  constructor(sessionId, { ipc = new CodexIpc(), timeoutMs = 5000 } = {}) {
+  constructor(sessionId, { ipc = new CodexIpc(), timeoutMs = 5000, accountQuota } = {}) {
     if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error('Invalid Codex session ID.');
-    this.id = sessionId.toLowerCase(); this.ipc = ipc; this.timeoutMs = timeoutMs;
+    this.id = sessionId.toLowerCase(); this.ipc = ipc; this.timeoutMs = timeoutMs; this.accountQuota = accountQuota;
     this.snapshot = null; this.ownerId = null; this.activityRevision = 0; this.waiters = new Set();
     this.onBroadcast = frame => {
       if (frame.method === 'client-status-changed' && frame.params?.clientId === this.ownerId && frame.params.status === 'disconnected') {
@@ -123,7 +144,8 @@ export class CodexRuntime {
         let projected; try { projected = projectCodexState(change.conversationState); } catch { return; }
         const signature = hash({ activity: projected.activity, activeTurnId: projected.activeTurnId,
           pendingRequests: projected.pendingRequests, model: projected.model, effort: projected.effort,
-          permissions: projected.permissionFingerprint, goal: projected.goalStatus, subagents: projected.subagentHistoryPresent,
+          selectionKnown: projected.selectionKnown, selectionPending: projected.selectionPending,
+          permissions: projected.permissionFingerprint, goal: projected.goalStatus, subagents: projected.subagentActivity,
           head: projected.latestTurn?.id, quota: projected.quota, turnOrderUncertain: projected.turnOrderUncertain,
           unconfirmedSubmissions: projected.unconfirmedSubmissions });
         if (signature !== this.signature) { this.activityRevision++; this.signature = signature; }
@@ -137,7 +159,8 @@ export class CodexRuntime {
   async connect() { await this.ipc.connect(); return this; }
   async status() {
     if (this.refreshing) return this.refreshing;
-    this.refreshing = this.refresh().finally(() => { this.refreshing = null; }); return this.refreshing;
+    this.refreshing = Promise.all([this.refresh(), this.accountQuota?.read()]).then(([state, quota]) => ({ ...state,
+      ...(quota ? { accountQuota: quota } : {}) })).finally(() => { this.refreshing = null; }); return this.refreshing;
   }
   async refresh() {
     const base = { client: 'codex', sessionId: this.id, connected: false, activity: 'offline',
@@ -160,7 +183,7 @@ export class CodexRuntime {
         this.waiters.add(done);
         try { this.ipc.following(this.id, this.ownerId); } catch (error) { clearTimeout(timer); this.waiters.delete(done); reject(error); }
       });
-      const parallelUnverified = snapshot.subagentHistoryPresent || snapshot.goalStatus === 'active';
+      const parallelUnverified = hasPendingSubagents(snapshot) || snapshot.goalStatus === 'active';
       return { ...base, ...snapshot, connected: true, instanceId: this.ownerId,
         capabilities: { ...base.capabilities, hardAutomation: !parallelUnverified, automaticMaintenance: !parallelUnverified } };
     } catch (error) { return { ...base, activity: this.ipc.connected ? 'unknown' : 'offline', detail: error.message }; }
@@ -191,7 +214,7 @@ export class CodexRuntime {
   async startMessage(message, expected, activity, canDispatch) {
     if (typeof message !== 'string' || !message.trim()) throw new Error('A non-empty control message is required.');
     const current = await this.checkExpected(expected, activity);
-    if (!current || canDispatch && !canDispatch()) return { status: 'state_conflict' };
+    if (!current || current.selectionPending || accountQuotaBlocked(current) || canDispatch && !canDispatch()) return { status: 'state_conflict' };
     const response = await this.ipc.request('thread-follower-start-turn', { conversationId: this.id,
       turnStart: { request: { threadId: this.id, input: [{ type: 'text', text: message, text_elements: [] }] },
         context: { inheritThreadSettings: true } } }, this.ownerId, 20000);
@@ -200,7 +223,8 @@ export class CodexRuntime {
       : { status: 'unknown', detail: 'Native start did not confirm its outcome.' };
   }
   async compact(expected) {
-    if (!await this.checkExpected(expected, 'idle')) return { status: 'state_conflict' };
+    const current = await this.checkExpected(expected, 'idle');
+    if (!current || current.selectionPending || accountQuotaBlocked(current)) return { status: 'state_conflict' };
     const response = await this.ipc.request('thread-follower-compact-thread', { conversationId: this.id }, this.ownerId, 20000);
     return { status: response.resultType === 'success' ? 'acknowledged' : 'unknown' };
   }

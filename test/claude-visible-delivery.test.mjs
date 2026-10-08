@@ -38,3 +38,14 @@ test('old or disconnected visibility support is reported, never retried or upgra
   await assert.rejects(r.sendMessage('test', { kind: 'interrupt' }), /Invalid/);
   assert.equal(count, 1);
 });
+
+test('known pre-submission failure cancels peer tracking; ambiguous submission keeps it pending', async () => {
+  for (const outcome of ['not_submitted', 'unknown']) {
+    const r = new ClaudeRuntime(randomUUID()), actions = [];
+    r.status = async () => ({ instanceId: 'original', activity: 'idle', capabilities: { peerQuotaRecovery: true } });
+    r.request = async (path, body) => { assert.equal(path, '/peer-intent'); actions.push(body.action); return { status: 'ready' }; };
+    r.sendPeer = async () => { throw Object.assign(Error('fixture transport failure'), { outcome }); };
+    await assert.rejects(r.sendMessage('fixture'), /transport failure/);
+    assert.deepEqual(actions, outcome === 'not_submitted' ? ['prepare', 'cancel'] : ['prepare']);
+  }
+});

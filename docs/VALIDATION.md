@@ -1,5 +1,147 @@
 # Validation and supported scope
 
+## 2026-10-08 示例研究会话 可用额度与历史子任务误阻塞
+
+修复 Codex 把全部历史协作调用永久当作未结束后台工作的判定，并修复重连被阻塞时额度解释停止刷新。原生记录确认 示例研究会话 的 19 个子任务都已结束，47 个旧 wait 调用也已完成；当前可继续。缺少完成证据或新子任务仍保持检查。
+
+**385 项测试、4 组浏览器检查通过**。管理服务于北京时间 **17:47:39** 更新；恢复确认已记录为 approved 后，系统在 **17:48:08** 只提交一次继续请求，**17:48:11** 提交排队消息，原生新轮次已运行。具体证据和边界见 [CODEX-HISTORICAL-AGENTS-2026-10-08.md](CODEX-HISTORICAL-AGENTS-2026-10-08.md)。
+
+## 2026-10-08 OpenCode 设置一致性限制补齐
+
+按后续要求，OpenCode 接入的活动版本号移除 effort/variant 与权限配置哈希；真实原生审批请求、模型/代理、新输入、子任务、回滚和幂等操作检查仍保留。最终发送采用最后一次核对的当前 variant，不会把检查前的旧值写回。
+
+**41 项关联测试通过**，包含两次检查之间改变设置、压缩后改变设置仍正常恢复、回执与 FIFO 只释放一次，以及待审批/新输入继续阻塞控制。证据：`.cooperation/verification/opencode-settings-unlock-targeted.txt`。代码已保存，现有 OpenCode 后端需重启加载；本轮未重启管理服务、原生客户端或发送真实消息。
+
+## 2026-10-08 移除思考强度与权限一致性限制
+
+按用户新要求，Claude/Codex 的维护、恢复回执和额度接续不再因 effort 或权限元数据与先前不同而阻塞，仍沿用当前原生设置。补齐 OpenCode 发送权限声明，未知声明的消息明确留在本地队列；原生接收策略和真实发送方权限不变。指定消息在本次压缩开始前已于 Claude 原生端过期，未自动重发。
+
+**373 项自动测试、3 组浏览器检查通过**，另完成已安装 Claude 原生消息解析器/默认策略的离线回放。管理服务于北京时间 **13:39:53** 更新，原维护、回执和队列保持。详细证据、客户端加载要求及原生接收边界见 [SETTINGS-UNLOCK-2026-10-08.md](SETTINGS-UNLOCK-2026-10-08.md)。以下旧记录中的设置一致性限制描述属于当时实现，已由本次用户要求取代。
+
+## 2026-10-07 Claude Code / Codex 恢复链路追加审计
+
+修复设置同步旧值、默认值与未知值混淆、查询超时槽位耗尽、回执设置比较不一致、Codex 额度暂停交付缺少额度参数、额度时长误标、小幅跨进程时差，以及设置已就绪/额度已恢复时的卡片旧状态。完整记录见 [AUDIT-2026-10-07.md](AUDIT-2026-10-07.md)。
+
+全量 **364 项通过，0 失败、跳过或取消**；实际浏览器 **8 组通过 / 0 页面错误**。最后的视图提示另通过 16 项测试，Claude 选择来源保留另运行原生 wrapper 专项。北京时间 **21:23:58** 更新管理服务，现有维护、回执、策略和 ready / unknown 消息保持；无真实消息发送或原生客户端重启。Claude 当前运行连接需加载本轮新增的设置同步能力，管理页需刷新加载卡片变化检测。
+
+## 2026-10-07 已打开的管理页沿用旧状态文案
+
+20:40 实时核对：Claude example-id-07 的后台原因是旧接入尚未加载启动参数修复，`requiresReopen=true`，原生 PID（本地记录） 仍为 19:59 启动的旧实例；没有设置变更证据。新视图对同一快照显示“已连接，需要重开面板加载修复”，而旧视图会因为原因中含“模型设置”误归为“会话设置发生变化”。HTTP 已设 `Cache-Control: no-store`，但它不会替换已在打开页面中执行的 ES module。
+
+管理页现于服务 boot ID 改变、点击“更新状态”或刷新会话列表时重新加载状态视图模块，并清除卡片显示签名。此过程不重载整页，保留未保存提示词、表单和导航；不批准接续确认、不发起维护。已有旧页面仍需先用浏览器 F5 完整刷新一次，加载这段更新逻辑；它与 Claude 原生接入加载属于两件事。
+
+隔离实际浏览器 **3 组通过 / 0 页面错误**：重现旧文案后不刷新整页即可加载新文案；服务重启后自动更新显示且保留未保存提示词；接续确认仍为 pending，维护仍暂停。证据 `.cooperation/verification/live-view-update-browser.json`。本次只有静态页面代码更新，无需重启生产管理服务或原生客户端。
+
+## 2026-10-07 Claude 已连接但恢复卡住：启动参数、设置和压缩失败
+
+生产会话 example-id-07 的 Claude 实际以 `--resume=UUID` 启动，而旧 wrapper 只识别 `--resume UUID`，因此设置读取根本未启动。恢复状态又把设置未就绪统一显示成“等待重新连接”。其维护流程 example-id 的压缩请求已返回 `not_compacted`，没有压缩边界；旧页面没有提供这一已知失败结果的可执行接续入口。
+
+现在识别分离和等号两种原生参数，已初始化会话也能在第一条业务消息之前查询当前设置。管理页区分离线、已连接等待设置、设置读取失败、当前回复、待确认权限、核对历史和旧接入需要更新；等待原因随观察结果变化，不重置原阶段期限。旧进程缺少新版设置读取能力时明确提示重开同一面板一次，不让用户反复试连接。
+
+对精确请求的终态 `failed` / `not_compacted`，仅在没有压缩边界和完成记录时允许“重新保存进度并继续整理”。点击时重新核对会话、设置和可用额度，并再次检查原生状态没有变化；新流程、交付文档和凭证重新生成，原交付、回执、失败记录和 FIFO 队列保留。仍处于已核对额度中断的原生轮次使用额度接续通道保存新进度。未知结果、已有压缩边界、晚到的成功结果、取消、人工停止和检查期间的新输入均不能直接重压缩。维护因额度暂停后每分钟查询实际额度；额度未知不会被当成耗尽或可用。
+
+本机 2.1.280 的隔离原生测试还确认：默认 `get_settings` 返回模型名带 `[1m]`，原回复 metadata 则可只含基础模型名。比较现区分历史解析名和明确的模型选择，两次明确选择的窗口变化仍判为变更；明确清空思考强度判为设置变化，不再无限等待同步。原生测试无业务提示，配置和缓存均位于本项目内。
+
+完整 **352 项测试通过，0 失败、跳过或取消**。新增回归覆盖等号参数、两种启动顺序、额度耗尽/未知/恢复、真实设置变更、旧 wrapper 升级提示、接续时取消/输入竞态、重复操作、一次压缩和恢复后 FIFO；原有五阶段恢复测试仍通过。实际浏览器 **7 组通过 / 0 页面错误**，点击按钮到后端并检查 390px 布局。证据：`.cooperation/verification/reconnect-recovery-full-tests.txt`、`reconnect-recovery-browser.json`、`reconnect-default-settings-native.json`；最后的额度缺项提示更新另通过 7 项视图测试和相同浏览器检查。
+
+北京时间 **20:31** 已更新管理服务。3 个未结束流程、交付回执、配置和所有待发/未知发送记录保持；只增加该失败维护的额度查询结果。生产 API 已确认目标 `connected=true`、`requiresReopen=true`、`compactionFailed=true`、`canRestartFromCurrent=true`。当时 Claude 额度接口缺少五小时和每周数据，保持 UNKNOWN 并定时重查。原生 Claude 面板未被关闭、未发送真实业务/维护消息、未替用户完成重启接续确认；同一面板重开后才会加载新版 wrapper。部署证据：`reconnect-recovery-deployment.json`。
+
+## 2026-10-07 新输入后的维护继续入口
+
+流程 example-id 的 handoff 回执已接受，但服务与原生进程重启后，最新会话轮次已变成后续用户输入。自动恢复正确拒绝沿旧控制轮次压缩，然而前端仍只显示“检查并继续”，没有可执行的后续操作。
+
+现在对尚未发起压缩的暂停流程提供“按当前进度继续维护”。用户点击后核对当前原生会话、工作目录、空闲状态、权限请求和额度，再以新的流程 ID、文档路径和回执凭证保存最新进度。旧流程标记 cancelled 并关联新流程，旧交付与已接受回执保留；旧锁到新锁的转移在同一数据库事务内完成，排队消息没有提前放行的间隙。任意压缩意图、请求、结果或压缩后阶段均禁止走此入口；已有压缩仍需核对原结果。
+
+当前会话仍在回复时按钮显示但禁用，并提示回复结束后可用。新流程按当前空闲状态启动，不重放原业务输入；新 handoff、一次压缩、restored 回执和原生轮次结束后才放行 FIFO。此功能只由明确的页面操作调用，不因新输入自动重启维护。
+
+完整测试 **340 项通过，0 失败、跳过或取消**；针对性 **57 项通过**。新增 6 项回归覆盖端到端新旧流程切换、旧回执保存、FIFO、重复请求拒绝、压缩意图保护、取消竞态和事务回滚。浏览器 **4 组通过 / 0 页面错误**，实际点击新按钮验证后端请求与状态转换，含 390px；未向生产会话发送维护提示或执行压缩。
+
+证据：`.cooperation/verification/continue-current-targeted.txt`、`continue-current-full-tests.txt`、`continue-current-browser.json`。
+
+已于北京时间 20:12 更新管理服务，实际监控 API 已对 example-id 返回 `canRestartFromCurrent=true`。发布前确认其他待重连流程的原生操作已结束、没有在途控制请求，保留 3 个未完成流程及所有待发／未知发送记录；没有替用户点击生产会话的继续按钮。部署记录为 `continue-current-deployment.json`。
+
+## 2026-10-07 额度查询不完整与过时维护锁
+
+10 月 6 日 18:53，Claude 示例会话 的 `get_usage` 仅返回周额度 50%，五小时窗口缺失。原生扩展日志反复报告 `Usage fetch returned a fieldless or non-object body (in-band error)`。本机 2.1.280 源码显示：额度端点失败时会回退到仍未过期的响应头窗口，而五小时窗口到期后从回退数据消失。此结果无法证明剩余额度为零，也不能仅凭时间证明已恢复。
+
+现在将该状态显示为“额度查询不完整”，明确缺少五小时数据及 `/usage` 核对方法；原生离线时不显示过期的下次查询时间。解析支持服务器返回的 `limits[]`，按 `session` / `weekly_all` 类型确定必需窗口；其他返回窗口也保留约束。缺失、未知及不完整数据保持 unknown，不补零。新版解析由 wrapper 加载，原生客户端重新打开后生效；页面说明兼容旧版返回的窗口列表。
+
+审计同时确认，Claude 示例会话 曾于 10 月 6 日 19:55 自动提交额度继续，20:40 再次因五小时额度中断。10 月 7 日核对时原生客户端已离线，另有 1 条消息保留在队列中；未重发业务内容或伪造额度恢复。
+
+本 Codex 对话的卡锁来自 10 月 4 日流程 `example-id-01`：恢复回执曾被拒绝，此后已有新的原生工作，旧流程已过时。本轮备份后通过正常取消接口结束该旧流程，状态为 cancelled，释放维护锁；交付文档摘要、原 handoff 回执及队列均保持不变，没有伪造 restored 回执。取消时记录当前正在执行的轮次，待当前回复结束后再按原策略评估新维护，避免立即打断当前回复。
+
+完整测试 **334 项通过，0 失败、跳过或取消**；针对性 **60 项通过**，浏览器 **4 组通过 / 0 页面错误**，含 390px。新增回归覆盖缺失窗口、现代窗口列表、原生通道字段过滤、仅在完整额度恢复后提交一次，以及取消旧锁后不立即中断当前轮次。未以真实耗尽或重复提交业务进行验证。管理服务已于北京时间 10 月 7 日 10:41 更新，保留 1 条待发消息。
+
+证据：`.cooperation/verification/quota-diagnostics-targeted.txt`、`quota-diagnostics-full-tests.txt`、`quota-diagnostics-browser.json`、`quota-diagnostics-deployment.json`、`obsolete-codex-cycle-repair.json`。Claude 上游额度接口异常尚未由本项目修复；当前离线，需重新打开原会话并按管理页确认接续，之后以实时完整额度数据判断。
+
+## 2026-10-06 Codex 空闲时独立检测账户额度
+
+旧实现只在原生轮次出现额度失败后查询账户额度；因此其他显示 idle 的会话没有独立额度状态。另外，真实 `threadRuntimeStatus.type=systemError` 配合终态 `usageLimitExceeded` 被归为 unknown，无法进入正常额度接续。
+
+管理服务现通过已有原生 App Tools 连接每分钟共享查询一次账户额度，查询与模型轮次和用户消息无关，多会话共享查询及缓存。账户结果与具体轮次失败分别保存：空闲会话可显示“账户额度不足”，排队投递和新维护等待容量；运行中的原生任务仍显示工作中。额度恢复不会为已完成的会话凭空建立继续请求。具有明确原生终态额度错误的 systemError 可进入原有接续流程，待审批、混合轮次不确定及通用错误继续保留限制。
+
+查询失败或过期显示 unknown，不视为零用量。仅保留额度窗口、状态及查询时间，不保存账户 ID、重置券或凭据。账户查询由管理后台运行，不需要用户在耗尽额度的 Codex 聊天中再发消息；前提是管理服务与原生额度连接可用。
+
+完整测试 **329 项通过，0 失败、跳过或取消**；新增 6 项回归覆盖共享查询、失败/过期处理、空闲无错误时检测、FIFO 保留及恢复、systemError、原生操作前检查、维护阶段等待及页面状态。浏览器 **5 组通过 / 0 页面错误**，含 390px。使用管理服务保存的连接独立读取真实账户额度成功，未调用模型或发送业务消息；没有人为耗尽真实账户做故障注入。证据：`.cooperation/verification/codex-passive-quota-full-tests.txt`、`codex-passive-quota-browser.json`、`codex-passive-quota-native.json`。
+
+已于北京时间 16:30 更新本地管理服务，后台自动查询的账户额度及下一次查询时间已出现在真实会话监控状态中。更新保留暂停流程、回执、策略和消息队列；未重启原生客户端。部署记录为 `codex-passive-quota-deployment.json`。
+
+## 2026-10-06 Claude socket 消息缺少发送方权限模式
+
+10:32 从 Codex `gs` 提交到 Claude Claude 示例会话 的消息因 `no-mode-asserted` 暂存，并在 10:37 过期；新版接入已正确清除等待标记。核对时双方均为完整访问／绕过权限，所查用户及项目配置未显式设置 `crossSessionInbound`。剩余问题是发送适配器没有携带发送方权限声明。
+
+发送路径现在在实际写入前读取发送方原生状态，核对会话 ID、工作目录和连接状态，只声明已知权限类别。Codex 的完整访问且不要求审批对应 bypass，受限文件访问对应 prompting；Claude 使用已知实际权限模式，其他或未知状态不猜测。声明放在 socket 接收器识别的原生 `cross-session-message` 封装 `from-mode` 属性中；不会冒用接收方的权限类别，不修改任一客户端设置。排队消息在投递时重新读取，正文中的声明不能覆盖外层声明。
+
+完整测试 **323 项通过，0 失败、跳过或取消**，针对性测试 **42 项通过**。真实本机命名管道模拟接收器验证 framing、认证、消息 ID 和两种权限类别；新增 4 项回归覆盖权限类别、来源核对、封装及排队后的权限变化。提取已安装 Claude 2.1.280 的纯解析与策略函数做离线回放：匹配类别 accept，跨类别 hold/mode-mismatch，缺失类别 hold/no-mode-asserted。该回放使用无标签样例和已知默认接收策略，未调用模型或向真实会话投递消息。
+
+证据：`.cooperation/verification/peer-mode-targeted.txt`、`peer-mode-full-tests.txt`、`peer-mode-native-replay.json`。此次没有重发已过期消息；真实业务投递仍需用户明确授权后核验接收结果。
+
+本地管理服务已于北京时间 10:52 更新，新服务已读取到发送方权限类别。Claude Claude 示例会话 仍为已连接、空闲、待接收 0 条，并已加载接收通知处理；此次发送修复无需再重开客户端。部署记录为 `peer-mode-deployment.json`。
+
+## 2026-10-05 Claude 协作消息过期后的残留等待
+
+Claude 示例会话 的原生会话已经完成上一轮回复，但接入仍报告 `pendingPeerMessages=1`、`activity=unknown`。只读原生扩展日志确认：22:35:57 收到的消息因 `no-mode-asserted` 被暂存，22:40:56 已过期丢弃。接收方使用 `bypassPermissions`，该消息未声明发送方权限模式；Cooperation 忽略了原生 `system/peer_message_hold` 通知，导致待接收标记一直不清除。
+
+接入现处理同一会话、socket 通道、已登记消息 ID 的 held / released / dropped 通知：暂存保留等待，释放仍需原生接收证据，丢弃只移除对应消息的等待标记。其他通道、其他会话、陌生或迟到通知不改变任务状态；真实工作和额度中断继续保留。已确认尚未提交的传输失败带有明确结果，发送方可清除准备标记；发送结果未知时仍保留等待。新增 `peerDeliveryLifecycle` 能力及最小接收状态元数据，页面分别显示等待接收、原生暂存和过期未送达。
+
+完整测试 **319 项通过，0 失败、跳过或取消**；新增 6 项回归，其中 3 项状态回归在修复前失败。实际 Windows wrapper 与协议测试进程验证 held / dropped 通知透传和等待清除；浏览器 **5 组通过 / 0 页面错误**，包含 390px。第一次完整运行有 1 个既有额度接续测试遇到跨进程时间采样偏差：查询时间稍晚于管理进程时钟，严格新鲜度检查正确保留等待。测试改为按真实轮询推进，生产新鲜度条件未放宽；原失败日志保留为 `claude-peer-hold-full-tests-first.txt`。
+
+本次对真实会话只清理已由原生日志确认过期的消息 `example-id-02` 的接入等待标记。前后原生 PID、会话 ID、模型、权限和最后完成轮次均一致，状态恢复为 idle、待接收数为 0；没有重启客户端、改变原生权限、发送或重发业务消息。现场证据为 `.cooperation/verification/claude-peer-hold-live-repair.json`，测试为 `claude-peer-hold-before.txt`、`claude-peer-hold-full-tests.txt`、`claude-peer-hold-browser.json`。
+
+独立无凭据官方 CLI 验证尝试未发布 peer inbox，因此在 peer 投递前退出，未计入原生投递验收；记录保留在 `claude-peer-hold-native.json`。永久通知处理随 wrapper 重开后加载；现有进程无法热加载。原生接收策略保持原样，过期消息不因状态修复而自动重发。
+
+管理服务已于北京时间 23:27 更新；发布后的 Claude 示例会话 状态为 connected=true、idle、pendingPeerMessages=0，现有 Claude 面板尚未加载 `peerDeliveryLifecycle`。两个原有暂停流程、回执、策略和提示词保持不变，部署记录为 `claude-peer-hold-deployment.json`。
+
+## 2026-10-05 后续维护与状态管理检查
+
+修复取消与重试／核对并发时旧结果重新激活流程、暂停维护不刷新连接状态、额度恢复遗漏权限别名兼容、取消后接续确认残留，以及原生权限等待掩盖暂停原因。详细结果及后续优化建议见 [本轮检查记录](AUDIT-2026-10-05.md)。
+
+9 个新回归在修复前全部失败，修复后针对性测试 **98 项通过**，完整测试 **313 项通过，0 失败、跳过或取消**。隔离浏览器 **4 组通过 / 0 页面错误**，包括 390px 布局；没有向真实业务会话发送测试消息、重新压缩或代替用户确认接续。证据为 `.cooperation/verification/audit-oct5-before.txt`、`audit-oct5-targeted.txt`、`audit-oct5-full-tests.txt`、`audit-oct5-browser.json`。
+
+修复已更新到本地管理服务；原暂停流程、回执和策略保持不变，启动后自动刷新暂停会话的实际状态。部署结果为 `audit-oct5-deployment.json`。
+
+## 2026-10-05 Codex 自动审批名称变化误判
+
+两个 Codex 对话均在恢复阶段被误报“思考强度或权限发生变化”。只读核对维护前与恢复轮次的原生记录，模型、思考强度、审批策略、审批人和实际文件权限一致。将桌面端的 `guardian_subagent` 改写为原生返回的 `auto_review`，可精确复现两个事件的前后权限指纹；本机官方桌面代码也将两者识别为同一种自动审批模式。官方当前配置名为 [`auto_review`](https://learn.chatgpt.com/docs/sandboxing/auto-review)。
+
+权限指纹 v3 统一该别名，并按旧指纹版本分别保留兼容值，支持已有 v1/v2 维护记录；不会把 v1 的隐含工作目录规则扩大到 v2。真正改变审批人、审批策略、权限配置、可写目录、网络或临时目录权限仍会停止接续。修复不改写原生设置，也不自动重放已暂停或取消的生产流程。
+
+完整测试 **304 项通过，0 失败、跳过或取消**。新增 5 项回归包括两个真实指纹回放、真实权限变更的反例、正常与超时后的恢复回执、只压缩一次以及回执后按序释放消息。55 项针对性测试通过。生产会话仅做只读核对；恢复接续通过隔离流程验证，没有向两个真实对话发送测试消息或重新执行压缩。
+
+证据：`.cooperation/verification/codex-reviewer-alias-evidence.json`、`codex-reviewer-alias-targeted.txt`、`codex-reviewer-alias-full-tests.txt`。取证脚本只保留权限元数据、哈希及流程标识，不保留对话正文或凭证。
+
+本地管理服务已于北京时间 2026-10-05 21:42 更新，实际服务状态返回权限指纹 v3。更新保留两个暂停流程、已有回执、策略和提示词，更新前待发 outbox 为 0；没有重启原生客户端或代替用户批准接续。服务重启确认按原规则重新生效，报告为 `codex-reviewer-alias-deployment.json`。
+
+## 2026-10-04 Claude 重开后的设置读取与状态说明
+
+修复只收到 initialize 成功回应、尚未发出 system/init 时的额度恢复卡住：启动参数提供明确权限模式，接入通过原生只读 get_settings 获取 applied.model / effort，并继续核对原会话历史。设置读取异步进行，慢响应不会拖住连接状态查询；读取期间的新用户输入或设置变化使旧结果失效。新的设置字段补全不会被误当作旧设置改变，已知设置真正不同时仍不自动继续。
+
+前端区分已连接但暂缓、旧接入需重开和实际离线，说明具体缺少的设置及下一步；接续确认与额度查询时间独立显示。过期额度记录标为待查询。核验期间继续读取额度，不发送继续提示。
+
+本轮完整测试 **299 项通过**，新增 9 项回归覆盖真实启动器在没有 system/init 时的两种启动顺序、只读字段过滤、慢查询与新输入竞态、实际设置变化、核验期间独立查询额度及界面事实。另有 **6 组浏览器检查 / 0 页面错误**，包含 390px 布局。独立运行已安装的官方 Claude 2.1.280，以项目内临时配置、回环假 API 地址和零业务提示验证 initialize/get_settings，返回实际 model / effort；没有启动模型请求、重启或注入生产会话。
+
+证据：`.cooperation/verification/reopen-settings-full-tests.txt`、`reopen-settings-browser.json`、`reopen-settings-native.json`、`reopen-settings-deployment.json`。前期完整检查暴露出查询时序及测试将初始化握手等同于设置就绪的问题；三份失败日志保留为 `reopen-settings-full-tests-first.txt`、`second.txt`、`third.txt` 对应文件。修复读取顺序、迟到结果保护，并让隔离服务按实际异步状态推进后，最终整套通过。
+
 ## 2026-10-02 项目重启接续确认
 
 完整测试 **290 项通过**，浏览器 **8 组通过 / 0 页面错误**。实际 wrapper + 隔离管理服务验证两种启动顺序的额度接续和五个维护阶段；确认前无新阶段提交，确认后仍保留回执、未知压缩和未知发送保护。三端队列验证先确认再连接、暂缓、重复重启和旧连接快照不得放行。覆盖服务关闭前、关闭期间和原任务重连后发生额度中断。OpenCode 原生协议验证当前 429 阻止压缩与直接投递，确认不能绕过限流，原会话新轮次恢复后按序投递。
@@ -214,12 +356,12 @@ The scoped pre-change backup and hash-guarded rollback helper are under `.cooper
 
 The user reopened only the existing `coop-claude-test` in this project and authorized testing. New wrapper capability `peerMessageVisibility` was confirmed; automatic maintenance was disabled and the mailbox was empty. The first wait-based attempt sent no peer: Claude used PowerShell/background execution, while the observer expected Bash. It is not counted as a visibility success.
 
-The subsequent read-only review test sent one peer message while the original native turn was running. The native queue recorded enqueue at 07:32:37.258Z, then one user record with the same message UUID at 07:32:57.678Z after the original review completed. Claude acknowledged the marker at 07:33:01.755Z. The process and wrapper instance stayed the same and ended idle; no interrupt was sent. The user explicitly confirmed seeing the bubble with the Cooperation title. Desktop automation initialization failed, so visual confirmation is user-observed, not an automated screenshot assertion. Immediate display at enqueue and history after reload remain unverified. Evidence: `.cooperation/peer-visible-native-6f23de86.json`.
+The subsequent read-only review test sent one peer message while the original native turn was running. The native queue recorded enqueue at 07:32:37.258Z, then one user record with the same message UUID at 07:32:57.678Z after the original review completed. Claude acknowledged the marker at 07:33:01.755Z. The process and wrapper instance stayed the same and ended idle; no interrupt was sent. The user explicitly confirmed seeing the bubble with the Cooperation title. Desktop automation initialization failed, so visual confirmation is user-observed, not an automated screenshot assertion. Immediate display at enqueue and history after reload remain unverified. Evidence: `.cooperation/peer-visible-native-example-id.json`.
 
 
 ## Unified visible delivery and history restoration (2026-09-12)
 
-Before changing delivery, both idle and busy submissions were retested on the dedicated `coop-claude-test`. Each produced exactly one native peer record and an acknowledgment; the busy review completed without interrupt, in the same process. The user reported both initially visible, but the latter disappearing after reopening. Evidence: `.cooperation/visible-unified-before-5f7d3c48.json`. This exposed the extension history loader's isMeta filter; it was not treated as a successful reload test.
+Before changing delivery, both idle and busy submissions were retested on the dedicated `coop-claude-test`. Each produced exactly one native peer record and an acknowledgment; the busy review completed without interrupt, in the same process. The user reported both initially visible, but the latter disappearing after reopening. Evidence: `.cooperation/visible-unified-before-example-id.json`. This exposed the extension history loader's isMeta filter; it was not treated as a successful reload test.
 
 All normal service sends now use ClaudeRuntime.sendMessage, which dispatches peer traffic without interrupt, while sendControl delegates maintenance through the same entry with its original idle/expected-state guard. Unsupported visibility is reported separately from transmission outcome. History recovery reads only the matching session transcript and follows current-branch ancestry; original files and model input remain untouched. It restores at most 200 confirmed Cooperation peers, reports truncation and read failures, and defers output to complete protocol lines.
 

@@ -133,6 +133,7 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
       if (request.method === 'GET' && url.pathname === '/api/monitoring') {
         return json(response, 200, { bootId: store.restartConfirmation.bootId, restartConfirmations: store.restartConfirmation.list(), sessions: store.db.prepare('SELECT data FROM snapshots').all().map(row => {
           const snapshot = JSON.parse(row.data); return { ...snapshot, policy: store.getPolicy(snapshot.session),
+            restartConsent: store.restartConfirmation.get(snapshot.session)?.status || null,
             cycle: service.publicCycle(store.activeCycle(snapshot.session)), lastCycle: service.publicCycle(store.lastCycle(snapshot.session)), queueCount: store.queueCount(snapshot.session), queueState: store.queueState(snapshot.session) };
         }) });
       }
@@ -178,6 +179,7 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
         if (url.pathname === '/api/runtime') return json(response, 200, await monitor.sample(await resolveSession(input.address), { native: input.native === true }));
         if (url.pathname === '/api/cycles/action') {
           if (input.action === 'retry') await controller.retry(input.id);
+          else if (input.action === 'restart-current') await controller.restartFromCurrent(input.id);
           else if (input.action === 'reconcile') await controller.reconcile(input.id);
           else if (['cancel-release', 'cancel-hold'].includes(input.action)) await controller.cancel(input.id, input.action === 'cancel-release');
           else throw new Error('未知的维护操作。');
@@ -272,7 +274,7 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
     if (port === 0) await listenLoopback(server);
     else await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
   }
-  catch (error) { await controller.close(); await service.mailbox.close(); await codexBridge?.close(); store.close(); throw error; }
+  catch (error) { await controller.close(); await service.mailbox.close(); await service.codexQuota?.close(); await codexBridge?.close(); store.close(); throw error; }
   actualPort = server.address().port;
   const connection = { url: `http://${host}:${actualPort}`, token, pid: process.pid, startedAt: new Date().toISOString() };
   const connectionFile = join(dataDirectory, 'connection.json');
@@ -281,7 +283,7 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
   async function close() {
     if (closed) return closingPromise; closed = true;
     closingPromise = (async () => {
-    await controller.close(); await service.lifecycle.close(); await service.mailbox.close(); await codexBridge?.close(); await prompts.close();
+    await controller.close(); await service.lifecycle.close(); await service.mailbox.close(); await service.codexQuota?.close(); await codexBridge?.close(); await prompts.close();
     for (const response of streams) response.end();
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));

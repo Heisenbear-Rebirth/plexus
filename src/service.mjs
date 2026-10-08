@@ -8,12 +8,15 @@ import { SessionMailbox } from './session-mailbox.mjs';
 import { sendVisibleClaudeMessage } from './runtime/claude-runtime.mjs';
 import { createRuntime } from './runtime/factory.mjs';
 import { createOpenCodeAdapter } from './adapters/opencode.mjs';
-import { controlTurnEnded } from './maintenance-recovery.mjs';
+import { controlTurnEnded, canRestartFromCurrent, confirmedCompactionFailure } from './maintenance-recovery.mjs';
 import { SessionLifecycle } from './session-lifecycle.mjs';
 import { readAccessPolicy } from './access-policy.mjs';
 import { createClaudeNativeUi } from './native-ui-adapter.mjs';
 import { readPromptSettings } from './prompt-settings.mjs';
 import { applyMessageAffixes } from '../public/prompt-templates.mjs';
+import { senderPeerPermissionClass } from './peer-permissions.mjs';
+import { CodexAccountQuota } from './codex-account-quota.mjs';
+import { accountQuotaBlocked } from './quota-state.mjs';
 
 export class CooperationService {
   constructor({ store, root, codexContext, codexBridge, onMessage = () => {}, adapters, lifecycleDirectories, runtimeFactory, accessPolicy } = {}) {
@@ -24,11 +27,14 @@ export class CooperationService {
       codex: { list: listCodexSessions, find: findCodexSession, send: sendCodexMessage },
       opencode: createOpenCodeAdapter({ root }),
     };
+    this.codexQuota = !adapters ? new CodexAccountQuota({ context: async () => this.codexBridge
+      ? this.codexBridge.getContext() : this.codexContext }) : null;
+    this.runtimeFactory = runtimeFactory || (session => createRuntime(session, { opencode: this.adapters.opencode, codexQuota: this.codexQuota }));
     // Injected transports may provide their own runtime. Production Codex
     // deliveries read the existing native owner; the send still uses App Tools.
-    this.deliveryRuntimeFactory = runtimeFactory || (!adapters ? session => createRuntime(session, { opencode: this.adapters.opencode }) : null);
+    this.deliveryRuntimeFactory = runtimeFactory || (!adapters ? this.runtimeFactory : null);
     if (store?.reserveLifecycle) this.lifecycle = new SessionLifecycle({ store, root, adapters: this.adapters, directories: lifecycleDirectories, accessPolicy,
-      runtimeFactory: runtimeFactory || (session => createRuntime(session, { opencode: this.adapters.opencode })) });
+      runtimeFactory: this.runtimeFactory });
     if (store?.admit) this.mailbox = new SessionMailbox({ store, onMessage,
       deliverMessage: async record => {
         const access = this.accessPolicy || await readAccessPolicy(); access.assert(record.from.cwd); access.assert(record.to.cwd);
@@ -37,7 +43,7 @@ export class CooperationService {
           try {
             runtime = this.deliveryRuntimeFactory(record.to);
             const current = await runtime.status();
-            if (current.quota) return { status: 'deferred', notSubmitted: true, runtime: current,
+            if (current.quota || accountQuotaBlocked(current)) return { status: 'deferred', notSubmitted: true, runtime: current,
               detail: '接收会话额度不足，消息已保留，等待额度恢复。' };
           } catch { /* An unavailable observer is not evidence of exhausted quota. */ }
           finally { runtime?.close?.(); }
@@ -47,7 +53,7 @@ export class CooperationService {
         catch (error) { if (record.to.client === 'codex') this.codexBridge?.invalidate(); throw error; }
       },
       deliverResume: async item => {
-        const runtime = createRuntime(item.to, { opencode: this.adapters.opencode });
+        const runtime = this.runtimeFactory(item.to);
         try {
           const current = await runtime.status(); const cycle = store.cycle(item.cycleId);
           if (current.instanceId !== cycle.triggerRuntime.instanceId || !controlTurnEnded(cycle, current))
@@ -61,6 +67,14 @@ export class CooperationService {
     const envelope = messageEnvelope(record.from, record.text, record.id);
     return { targetId: record.to.id, targetSession: record.to, messageId: record.id,
       text: record.to.client === 'opencode' ? envelope : applyMessageAffixes(envelope, affixes),
+      ...(record.to.client === 'claude' && this.deliveryRuntimeFactory ? {
+        readSenderPermissionClass: async () => {
+          let runtime;
+          try { runtime = this.deliveryRuntimeFactory(record.from); return senderPeerPermissionClass(record.from, await runtime.status()); }
+          catch { return null; }
+          finally { runtime?.close?.(); }
+        },
+      } : {}),
       ...(record.to.client === 'opencode' ? { messageAffixes: { prefix: affixes.prefix, suffix: affixes.suffix } } : {}) };
   }
   async sessions({ directory, directories, recursive = false }) {
@@ -99,7 +113,8 @@ export class CooperationService {
   }
   publicCycle(cycle) {
     if (!cycle) return null;
-    return Object.fromEntries(['id', 'state', 'previousState', 'trigger', 'wasWorkingAtTrigger', 'createdAt', 'updatedAt', 'reason', 'handoffPath', 'lastAttemptOutcome', 'completedAt', 'lastReceiptIssue', 'lateReceiptAccepted'].map(key => [key, cycle[key]]));
+    return { ...Object.fromEntries(['id', 'state', 'previousState', 'trigger', 'wasWorkingAtTrigger', 'createdAt', 'updatedAt', 'reason', 'handoffPath', 'lastAttemptOutcome', 'completedAt', 'lastReceiptIssue', 'lateReceiptAccepted'].map(key => [key, cycle[key]])),
+      canRestartFromCurrent: canRestartFromCurrent(cycle), compactionFailed: confirmedCompactionFailure(cycle), maintenanceQuota: cycle.maintenanceQuota };
   }
   async send({ from, to, message }, source) {
     if (typeof message !== 'string' || !message.trim()) throw new Error('消息内容不能为空。');

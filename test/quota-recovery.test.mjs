@@ -2,16 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { resolve, join, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { publicCodexQuota, publicClaudeQuota, freshAvailableQuota } from '../src/quota-state.mjs';
+import { randomUUID, createHash } from 'node:crypto';
+import { publicCodexQuota, publicClaudeQuota, freshAvailableQuota, receivedNativeQuota } from '../src/quota-state.mjs';
 import { ClaudeProtocolState } from '../src/claude-wrapper-state.mjs';
-import { projectCodexState } from '../src/runtime/codex-runtime.mjs';
+import { projectCodexState, permissionSelection } from '../src/runtime/codex-runtime.mjs';
 import { ManagementStore } from '../src/management-store.mjs';
 import { QuotaRecovery, quotaSettingKey } from '../src/quota-recovery.mjs';
 import { MaintenanceController } from '../src/maintenance-controller.mjs';
 import { evaluatePolicy } from '../src/context-policy.mjs';
 import { SessionMailbox } from '../src/session-mailbox.mjs';
 import { defaultPromptValues, validatePromptValues } from '../public/prompt-templates.mjs';
+
+test('a newly received native quota tolerates small cross-process clock skew without refreshing old or distant-future readings', () => {
+  const now = Date.now(), reading = delta => ({ status: 'available', queriedAt: new Date(now + delta).toISOString() });
+  const small = receivedNativeQuota(reading(6), now);
+  assert.equal(small.nativeQueriedAt, reading(6).queriedAt); assert.equal(freshAvailableQuota(small, now), true);
+  assert.equal(freshAvailableQuota(reading(6), now), false);
+  for (const delta of [-60001, 251, 60000]) assert.equal(freshAvailableQuota(receivedNativeQuota(reading(delta), now), now), false);
+});
 
 const codexUsage = (primary = 1, secondary = 2) => ({ ordinaryUsageAllowed: true,
   rateLimitsByLimitId: { codex: { primary: { usedPercent: primary, resetsAt: 1000 }, secondary: { usedPercent: secondary, resetsAt: 2000 } } } });
@@ -35,6 +43,23 @@ test('fresh quota reads require positive capacity in all known windows; elapsed 
   assert.equal(JSON.stringify(publicClaudeQuota(c)).includes('never-retain'), false);
   const d = codexUsage(); d.rateLimitsByLimitId.base_model_inference = { primary: { usedPercent: 100 } };
   assert.equal(publicCodexQuota(d).status, 'exhausted');
+});
+
+test('Claude server rows confirm both quota windows while header fallback missing five-hour data stays unknown after reset', () => {
+  const fallback = { rate_limits_available: true, rate_limits: { seven_day: { utilization: 50, resets_at: '2030-01-01' } } };
+  const incomplete = publicClaudeQuota(fallback);
+  assert.equal(incomplete.status, 'unknown'); assert.deepEqual(incomplete.missingWindows, ['five_hour']); assert.equal(incomplete.dataComplete, false);
+  assert.equal(incomplete.windows.some(w => w.id === 'five_hour'), false);
+  const rows = { rate_limits_available: true, rate_limits: { limits: [
+    { kind: 'session', group: 'session', percent: 0, resets_at: null },
+    { kind: 'weekly_all', group: 'weekly', percent: 50, resets_at: '2030-01-01' },
+  ] }, session: { private: 'never-retain' } };
+  assert.equal(publicClaudeQuota(rows).status, 'available'); assert.equal(publicClaudeQuota(rows).dataComplete, true);
+  assert.doesNotMatch(JSON.stringify(publicClaudeQuota(rows)), /never-retain/);
+  rows.rate_limits.limits.push({ kind: 'weekly_scoped', percent: 100 }); assert.equal(publicClaudeQuota(rows).status, 'exhausted');
+  rows.rate_limits.limits[2].percent = null; assert.equal(publicClaudeQuota(rows).status, 'unknown');
+  rows.rate_limits.limits = []; assert.equal(publicClaudeQuota(rows).status, 'unknown');
+  rows.rate_limits.limits = [{ kind: 'weekly_all', percent: 50 }]; assert.equal(publicClaudeQuota(rows).status, 'unknown');
 });
 test('Codex recognizes only a structured quota failure on the head, not ordinary interrupted turns, prose or historical failures', () => {
   const state = { id: randomUUID(), cwd: resolve('.'), threadRuntimeStatus: { type: 'idle' }, turns: [
@@ -165,7 +190,57 @@ async function fixture(t, client) {
     setReadHook: f => { readHook = f; }, reads: () => reads, controls: () => controlCount,
     restart: () => { controller.quotaRecovery = new QuotaRecovery({ root, store, service, monitor, readCodex }); } };
 }
+for (const withBasis of [false, true]) test(`Codex quota recovery preserves a pending v2 reviewer-alias record ${withBasis ? 'with' : 'without'} saved fingerprint version`, async t => {
+  const h = await fixture(t, 'codex');
+  const permissions = { approvalsReviewer: 'auto_review', approvalPolicy: 'on-request',
+    runtimeWorkspaceRoots: [h.root], sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false } };
+  const projected = projectCodexState({ id: h.session.id, cwd: h.root, currentPermissions: permissions });
+  const old = permissionSelection(permissions, h.session.id, undefined, h.root); old.approvalsReviewer = 'guardian_subagent';
+  h.state.permissionFingerprint = createHash('sha256').update(JSON.stringify(old)).digest('hex');
+  h.state.permissionFingerprintBasis = 'permission-selection-v2-implicit-workspace-root';
+  await h.handler();
+  const original = h.record();
+  const record = { ...original }; if (withBasis) record.permissionFingerprintBasis = h.state.permissionFingerprintBasis;
+  else delete record.permissionFingerprintBasis;
+  h.store.setSetting(quotaSettingKey(h.session), record);
+  h.restart(); h.state.activityRevision = 1;
+  for (const [key, value] of Object.entries(projected)) if (/permissionFingerprint|PermissionFingerprints/.test(key)) h.state[key] = value;
+  h.setUsed(0); h.forcePoll(); await h.handler(); await h.handler();
+  assert.equal(h.record().state, 'submitted'); assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].options.requestId, original.requestId);
+  assert.equal(h.record().permissionFingerprintBasis, projected.permissionFingerprintBasis);
+});
+
 for (const client of ['claude', 'codex']) {
+  test(`${client}: blocked reconnect still refreshes quota instead of freezing an old exhausted reading`, async t => {
+    const h=await fixture(t,client);await h.handler();h.state.instanceId='reopened';h.state.subagentHistoryPresent=true;
+    h.setUsed(0);h.forcePoll();await h.handler();
+    assert.equal(h.record().state,'waiting');assert.equal(h.record().quota.status,'available');
+    assert.match(h.record().reason,/额度已恢复/);assert.match(h.record().blockedReason,/子任务/);assert.ok(h.record().nextCheckAt);assert.equal(h.sent.length,0);
+    h.state.subagentWorkPending=false;h.forcePoll();await h.handler();assert.equal(h.record().state,'submitted');assert.equal(h.sent.length,1);
+  });
+  test(`${client}: selecting default effort preserves a verified failed head and resumes using current settings`, async t => {
+    const h = await fixture(t, client); await h.handler(); h.state.effort = null; h.state.selectionKnown = ['effort'];
+    h.state.instanceId = 'reopened'; h.setUsed(0); h.forcePoll(); await h.handler();
+    assert.equal(h.record().state, 'submitted'); assert.equal(h.sent.length, 1); assert.equal(h.sent[0].expected.effort, null);
+  });
+  test(`${client}: an effort-only revision in the same process does not invalidate quota recovery`, async t => {
+    const h = await fixture(t, client); await h.handler(); h.state.effort = 'low'; h.state.activityRevision++;
+    h.setUsed(0); h.forcePoll(); await h.handler(); assert.equal(h.record().state, 'submitted'); assert.equal(h.sent.length, 1);
+  });
+  test(`${client}: changed permission metadata does not cancel recovery and never overrides the native selection`, async t => {
+    const h = await fixture(t, client); await h.handler(); h.state.permissionMode = 'changed'; h.state.permissionFingerprint = 'new'; h.state.activityRevision++;
+    h.setUsed(0); h.forcePoll(); await h.handler(); assert.equal(h.record().state, 'submitted'); assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].expected.permissionMode, 'changed'); assert.equal(h.sent[0].expected.permissionFingerprint, 'new');
+  });
+  test(`${client}: pending restart checks refresh quota without submitting a continuation`, async t => {
+    const h = await fixture(t, client); await h.handler();
+    h.state.quotaRestart = { pending: true, stage: 'settings', reason: 'Claude 已连接，正在读取当前模型设置。' };
+    h.state.quota = null; h.state.activity = 'unknown'; h.setUsed(0); h.forcePoll();
+    await h.handler();
+    assert.equal(h.record().state, 'waiting'); assert.equal(h.record().quota.status, 'available');
+    assert.match(h.record().reason, /额度已恢复/); assert.equal(h.sent.length, 0);
+  });
   for (const order of ['manager-first', 'client-first']) test(`${client}: ${order} reboot rebinds a verified failed head and continues once`, async t => {
     const h = await fixture(t, client); await h.handler();
     const requestId = h.record().requestId;
@@ -245,6 +320,18 @@ for (const client of ['claude', 'codex']) {
     assert.ok(Date.parse(h.record().nextCheckAt) > Date.now() + 60000);
   });
 }
+
+test('missing Claude five-hour data never resumes from reset time alone; a later complete server reply resumes once', async t => {
+  const h = await fixture(t, 'claude');
+  h.state.quota.resetsAt = '2000-01-01T00:00:00Z';
+  let complete = false;
+  h.runtime.quota = async () => publicClaudeQuota({ rate_limits_available: true, rate_limits: complete ? { limits: [
+    { kind: 'session', percent: 0 }, { kind: 'weekly_all', percent: 50 },
+  ] } : { seven_day: { utilization: 50 } } });
+  await h.handler(); assert.equal(h.record().state, 'waiting'); assert.match(h.record().reason, /五小时.*数据/); assert.equal(h.sent.length, 0);
+  complete = true; h.forcePoll(); await h.handler(); await h.handler();
+  assert.equal(h.record().state, 'submitted'); assert.equal(h.sent.length, 1);
+});
 test('old prompt settings gain an editable quota continuation while rejecting unfilled maintenance variables', () => {
   const old = defaultPromptValues(); delete old.maintenance.quotaContinue;
   assert.match(validatePromptValues(old).maintenance.quotaContinue, /额度已恢复/);

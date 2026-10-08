@@ -167,3 +167,5 @@ dialog[open]::backdrop{opacity:1}
 /* Keyboard navigation is immediate; the next pointer press restores motion. */
 html[data-motion-input=keyboard] *,html[data-motion-input=keyboard] *::before,html[data-motion-input=keyboard] *::after,html[data-motion-input=keyboard] dialog::backdrop,html[data-motion-input=keyboard] details::details-content{transition:none!important;animation:none!important}
 html[data-motion-input=keyboard] .button:active,html[data-motion-input=keyboard] .icon-button:active,html[data-motion-input=keyboard] .member-card:active{transform:none!important}
+.quota-next-action{font-size:.875rem;line-height:1.65;color:var(--accent);padding:10px 12px;background:var(--tint);border-radius:8px;margin:10px 0 14px}
+.dot.recovery_pending{background:#c49242}.activity-badge.recovery_pending{background:#fff0d7;color:#866024}

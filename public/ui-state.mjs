@@ -175,7 +175,12 @@ export function directoryConnection({ client, directory = null, sessions = [], b
   };
   const connected = members.filter(s => allowed(s) && s.monitoring?.runtime?.connected === true
     && s.monitoring.runtime.controlsEnabled !== false && !stale(s.monitoring)).length;
-  if (connected) return result('connected', '已连接 ' + connected + ' 个', client === 'claude' && members.some(s => s.monitoring?.runtime?.requiresReopen) ? 'claude_reopen' : 'ready', connected);
+  if (connected) {
+    const restart = members.map(s => s.monitoring?.runtime).filter(r => r?.connected && r.quotaRestart?.pending);
+    const reason = client === 'claude' && (members.some(s => s.monitoring?.runtime?.requiresReopen) || restart.some(r => r.capabilities?.restartSelection !== true))
+      ? 'claude_reopen' : restart.length ? 'claude_recovery' : 'ready';
+    return result('connected', '已连接 ' + connected + ' 个', reason, connected);
+  }
   if (client === 'claude' && !directory?.claudeControlEnabled && !members.some(allowed)) return result('disconnected', '未接入', 'claude_access');
   if (!members.length) return result('disconnected', '未连接', 'no_sessions');
   if (members.every(s => !s.monitoring || stale(s.monitoring))) return result('checking', '待确认', 'checking');

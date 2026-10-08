@@ -97,7 +97,9 @@ for (const mode of ['enabled', 'env-disabled', 'config-disabled']) test(`busy wr
   assert.ok(output.some(m => m.message?.content?.[0]?.text === 'original-work-completed'));
   assert.equal((await status()).activity, 'idle');
   const inputs = (await readFile(join(dir, 'input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(inputs, [initialize, prompt]); // No duplicate delivery, injected input or interrupt.
+  const settingsReads = inputs.filter(m => m.type === 'control_request' && m.request?.subtype === 'get_settings');
+  assert.ok(settingsReads.length <= 1);
+  assert.deepEqual(inputs.filter(m => !settingsReads.includes(m)), [initialize, prompt]); // No duplicate delivery, business input or interrupt.
   assert.deepEqual(errors, []);
 });
 

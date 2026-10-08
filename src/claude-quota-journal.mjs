@@ -2,9 +2,11 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from '
 import { join } from 'node:path';
 import { readClaudeHistoryHead } from './maintenance-recovery.mjs';
 import { normalizeDirectory } from './directory-service.mjs';
+import { selectedModelChanged } from './model-identity.mjs';
 
 const uuid = value => /^[0-9a-f-]{36}$/i.test(value || '');
 const fields = ['model', 'effort', 'permissionMode'];
+const guardedFields = ['model'];
 // Only protocol metadata is retained, never prompt or transcript text. This
 // ledger outlives both the wrapper registry and the management service.
 export class ClaudeQuotaJournal {
@@ -12,6 +14,7 @@ export class ClaudeQuotaJournal {
     Object.assign(this, { directory, sessionId, cwd, readHead });
     this.loaded = false; this.candidate = null; this.nextRead = 0; this.generation = 0;
     this.reason = null; this.failed = false;
+    this.stage = 'history'; this.selectionError = false;
     this.load();
   }
   load() {
@@ -29,6 +32,8 @@ export class ClaudeQuotaJournal {
     }
   }
   get pending() { return Boolean(this.candidate) || this.failed; }
+  missingSelection(state) { return this.candidate ? guardedFields.filter(key => this.candidate[key] != null && state[key] == null) : []; }
+  waiting(stage, reason) { this.stage = stage; this.reason = reason; }
   observe(state) {
     if (!this.sessionId && state.sessionId) { this.sessionId = state.sessionId; this.load(); }
     if (!this.file) return;
@@ -37,6 +42,7 @@ export class ClaudeQuotaJournal {
     this.generation++; this.candidate = null; this.failed = false; this.reason = null;
     const record = { version: 1, sessionId: this.sessionId, cwd: this.cwd,
       lastInputId: state.lastObservedInputId, quota: state.quota, lastQuotaAssistantId: state.lastQuotaAssistantId,
+      modelSelectionSource: state.modelSelectionSource,
       ...Object.fromEntries(fields.map(key => [key, state[key] ?? null])) };
     const signature = JSON.stringify(record);
     if (signature === this.signature) return;
@@ -53,6 +59,11 @@ export class ClaudeQuotaJournal {
   async restore(state) {
     if (!this.candidate || !state.initialized || state.active || state.inputEnded || state.hostRequests.size
       || state.childRequests.size || state.queuedInputIds.length || state.backgroundTasks.size || state.expectedPeers.size) return;
+    if (state.selectionPending) {
+      this.waiting(this.selectionError ? 'settings_unavailable' : 'settings', this.selectionError
+        ? 'Claude 已连接，当前设置暂未读取成功，系统会重试。'
+        : 'Claude 已连接，正在读取当前模型和思考设置，随后核对退出前的中断记录。'); return;
+    }
     if (this.reading) return this.reading;
     if (Date.now() < this.nextRead) return;
     this.nextRead = Date.now() + 5000;
@@ -61,15 +72,22 @@ export class ClaudeQuotaJournal {
       const head = await this.readHead({ id: this.sessionId, cwd: this.cwd });
       if (this.candidate !== candidate || this.generation !== generation || state.activityRevision !== revision
         || state.active || state.userStopped || state.lastObservedInputId) return;
-      if (!head.verified) return;
+      if (!head.verified) { this.waiting('history_unavailable', 'Claude 已连接，但暂时读不到上次中断的聊天记录，自动接续已暂停。'); return; }
       if (!head.cwd || normalizeDirectory(head.cwd) !== normalizeDirectory(this.cwd) || head.lastInputId !== candidate.lastInputId
-        || fields.some(key => candidate[key] != null && state[key] != null && candidate[key] !== state[key])) {
+        || guardedFields.some(key => key === 'model' ? selectedModelChanged(candidate, state, 'claude')
+          : candidate[key] != null && (state[key] != null || state.selectionKnown?.has(key)) && candidate[key] !== state[key])) {
         // Verified new input/settings supersede the old failure.
         this.candidate = null; this.reason = null;
         state.lastObservedInputId = head.lastInputId; this.observe(state); return;
       }
-      if (fields.some(key => candidate[key] != null && state[key] == null)) return;
-      if (!head.quotaError && !(candidate.lastQuotaAssistantId && candidate.lastQuotaAssistantId === head.lastAssistantId)) return;
+      if (this.missingSelection(state).length) {
+        this.waiting(this.selectionError ? 'settings_unavailable' : 'settings', this.selectionError
+          ? 'Claude 已连接，但未能读取当前模型设置，自动接续暂缓。系统会重试，原任务保留。'
+          : 'Claude 已连接，上次中断记录已核对；正在读取当前模型和权限设置，随后重新查询额度。'); return;
+      }
+      if (!head.quotaError && !(candidate.lastQuotaAssistantId && candidate.lastQuotaAssistantId === head.lastAssistantId)) {
+        this.waiting('failure_unverified', 'Claude 已连接，但尚不能确认上次任务的结束结果。请在原会话核对，自动接续暂缓。'); return;
+      }
       state.quota = candidate.quota; state.lastCompletedTurnId = candidate.quota.turnId;
       state.lastObservedInputId = candidate.lastInputId; state.lastQuotaAssistantId = candidate.lastQuotaAssistantId;
       state.activityRevision++; this.observe(state);
