@@ -6,10 +6,15 @@ node_modules/
 /opencode.jsonc
 *.log
 
-# Local agent settings, handoffs, native-session evidence and backups
+# Local agent settings, memory and instructions, handoffs, native-session evidence and backups
 .claude/
 .codex/
 .agents/
+.opencode/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+/.plexus-config-backup/
 .env
 .env.*
 !.env.example
@@ -22,6 +27,7 @@ bin/claude-wrapper.exe
 bin/claude-wrapper.paths
 .*-test-*/
 .lifecycle-disabled-*/
+/test/.*/
 
 # Local evidence maintenance helpers
 scripts/verify-management-migration.mjs
