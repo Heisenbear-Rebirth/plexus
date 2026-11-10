@@ -12,6 +12,7 @@ import { loadPeerHistory } from './claude-peer-history.mjs';
 import { freshAvailableQuota } from './quota-state.mjs';
 import { listenLoopback } from './loopback-server.mjs';
 import { ClaudeQuotaJournal } from './claude-quota-journal.mjs';
+import { wrapperEnabledFor } from './wrapper-directories.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const normalize = value => resolve(value).replace(/^\\\\\?\\/, '').replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
@@ -28,8 +29,7 @@ try {
   peerMessageVisibility &&= config.peerMessageVisibility !== false;
   peerHistoryVisibility = process.env.COOP_PEER_HISTORY_VISIBILITY !== '0'
     && (peerHistoryVisibility || config.peerHistoryVisibility === true);
-  enabled = config.enabled === true && Array.isArray(config.directories) && config.directories.some(directory => normalize(directory) === normalize(process.cwd()))
-    && launchOption(args, '--input-format') === 'stream-json';
+  enabled = wrapperEnabledFor(config, process.cwd()) && launchOption(args, '--input-format') === 'stream-json';
 } catch { /* No project configuration means pure passthrough. */ }
 const child = spawn(binary, args, { cwd: process.cwd(), env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 const resumeArg = launchOption(args, '--resume');
@@ -50,25 +50,29 @@ const nativeUiInstanceId = /^[0-9a-f-]{36}$/.test(process.env.COOP_NATIVE_UI_INS
 let nativeLifecycleOperationId = null;
 let visibilityHistory = { status: enabled && peerMessageVisibility && peerHistoryVisibility ? 'pending' : 'disabled', count: 0 };
 let historyRestoreSession = null;
+// Session-scoped native flag layer; a new process starts without our value.
+let peerInbound = { desired: 'default', mode: 'default', state: 'ready', effective: null, decidedBy: null, verifiedAt: null, updatedAt: null };
+let peerInboundApplying = null, peerInboundVerifying = null, nextPeerInboundAttempt = 0;
 const auditFile = join(dataDirectory, 'compactions.jsonl');
 const audit = event => appendFile(auditFile, JSON.stringify({ at: new Date().toISOString(), instanceId, ...event }) + '\n', 'utf8');
 function publicState() { return { ...state.publicState(), wrapperPid: process.pid, childPid: child.pid, instanceId, cwd: process.cwd(),
   selectionRead,
   ...(quotaJournal?.pending ? { activity: state.activity() === 'idle' ? 'unknown' : state.activity(),
     quotaRestart: { pending: true, stage: quotaJournal.stage, missingFields: quotaJournal.missingSelection(state), reason: quotaJournal.reason } } : {}),
-  nativeUiInstanceId, nativeLifecycleOperationId,
+  nativeUiInstanceId, nativeLifecycleOperationId, peerInbound,
   protocolVersion: 2, connected: !closing && !state.inputEnded, observedAt: new Date().toISOString(),
   capabilities: { readActivity: true, interrupt: true, sendControl: true, compact: true, observeCompletion: true, passiveUsage: true,
-    quotaRecovery: true, peerQuotaRecovery: true, peerDeliveryLifecycle: true, inputLifecycle: true, restartRecovery: true, restartSelection: true, restartSelectionV2: true, selectionRefresh: true,
+    quotaRecovery: true, peerQuotaRecovery: true, peerDeliveryLifecycle: true, peerInboundControl: true, inputLifecycle: true, restartRecovery: true, restartSelection: true, restartSelectionV2: true, selectionRefresh: true,
     hardAutomation: false, peerMessageVisibility: enabled && peerMessageVisibility, peerHistoryVisibility: enabled && peerMessageVisibility && peerHistoryVisibility },
   visibilityHistory,
   canCompact: Boolean(!quotaJournal?.pending && !pending && !controlPending && !contextChannel.active && state.canCompact(inputObserver.atBoundary)),
   compactionRequestId: pending?.id || null, lastCompaction, controlPending, lastControl }; }
 function persist() {
   if (!enabled || !endpoint || closing) return;
-  const snapshot = { ...publicState(), endpoint, token, createdAt: startedAt };
-  delete snapshot.observedAt; // Do not rewrite the registry for every streamed token.
-  const signature = JSON.stringify(snapshot);
+  // The registry only locates this wrapper; live state is read from /status.
+  // Writing full state here rewrote the file several times a second while working.
+  const signature = JSON.stringify({ sessionId: state.sessionId, instanceId, cwd: process.cwd(), endpoint, token,
+    wrapperPid: process.pid, childPid: child.pid, initialized: state.initialized, protocolVersion: 2, createdAt: startedAt });
   if (signature === lastSnapshot) return; lastSnapshot = signature;
   if (registryTimer) return;
   registryTimer = setTimeout(() => {
@@ -120,9 +124,20 @@ const outputObserver = new JsonLineObserver(message => {
 });
 const startedAt = new Date().toISOString();
 const contextChannel = new NativeContextChannel(bytes => child.stdin.write(bytes), subtype => !pending &&
-  (subtype === 'interrupt' ? state.initialized && state.active && !state.inputEnded && inputObserver.atBoundary
+  (subtype === 'capacity' ? state.initialized && !state.inputEnded && inputObserver.atBoundary
+    : subtype === 'interrupt' ? state.initialized && state.active && !state.inputEnded && inputObserver.atBoundary
     : !controlPending && (subtype === 'get_usage' ? state.canReadQuota(inputObserver.atBoundary)
       : subtype === 'get_settings' ? state.canQuery(inputObserver.atBoundary) : state.canCompact(inputObserver.atBoundary))));
+// The window size is otherwise learned only when a turn ends or from an idle
+// query, so a session already working when the manager starts showed no
+// percentage until then. One local read fills it in, retried at most every 30 s.
+let capacityReading = null, nextCapacityRead = 0;
+function refreshCapacity() {
+  if (!state.usage || state.usage.contextWindowTokens > 0 || capacityReading || contextChannel.active || Date.now() < nextCapacityRead) return;
+  nextCapacityRead = Date.now() + 30000;
+  capacityReading = contextChannel.capacity().then(native => { if (state.observeCapacity(native)) persist(); })
+    .catch(() => {}).finally(() => { capacityReading = null; });
+}
 function refreshRestartSelection() {
   const needsSettings = () => state.selectionPending || !state.model || quotaJournal?.missingSelection(state).some(key => ['model', 'effort'].includes(key));
   if (!state.sessionId || !needsSettings()
@@ -193,10 +208,44 @@ function authorized(request) {
   const expected = `Bearer ${token}`;
   return value.length === expected.length && timingSafeEqual(Buffer.from(value), Buffer.from(expected));
 }
-async function directoryStillEnabled() {
+async function readControlConfig() {
   try { const config = JSON.parse(await readFile(join(dataDirectory, 'config.json'), 'utf8'));
-    return config.enabled === true && config.directories?.some(directory => normalize(directory) === normalize(process.cwd()));
-  } catch { return false; }
+    const controls = wrapperEnabledFor(config, process.cwd());
+    return { controls, acceptCrossMode: controls && config.peerCrossModeAccept === true };
+  } catch { return { controls: false, acceptCrossMode: false }; }
+}
+// The user's switch maps to Claude's own crossSessionInbound setting in this
+// process's flag layer: 'accept' when enabled, removed (null) when disabled.
+function syncPeerInbound(accept) {
+  const desired = accept ? 'accept' : 'default';
+  if (peerInbound.desired !== desired) { peerInbound = { ...peerInbound, desired }; nextPeerInboundAttempt = 0; }
+  if (peerInboundApplying) return peerInboundApplying;
+  if (peerInbound.mode === desired) {
+    if (!['ready', 'applied'].includes(peerInbound.state)) peerInbound = { ...peerInbound, state: 'applied' };
+    verifyPeerInbound(); return Promise.resolve();
+  }
+  if (closing || Date.now() < nextPeerInboundAttempt || !state.initialized || state.inputEnded || !inputObserver.atBoundary) {
+    if (peerInbound.state !== 'failed') peerInbound = { ...peerInbound, state: 'pending' };
+    return Promise.resolve();
+  }
+  peerInbound = { ...peerInbound, state: 'applying' };
+  peerInboundApplying = contextChannel.applyFlagSettings({ crossSessionInbound: desired === 'accept' ? 'accept' : null })
+    .then(() => { peerInbound = { ...peerInbound, mode: desired, state: 'applied', verifiedAt: null, updatedAt: new Date().toISOString() };
+      void audit({ type: 'peer_inbound_applied', mode: desired }).catch(() => {}); })
+    .catch(error => { nextPeerInboundAttempt = Date.now() + 30000;
+      peerInbound = { ...peerInbound, mode: error.outcome === 'unknown' ? null : peerInbound.mode, state: 'failed', updatedAt: new Date().toISOString() }; })
+    .finally(() => { peerInboundApplying = null; persist(); verifyPeerInbound(); });
+  return peerInboundApplying;
+}
+// Read back what the native receive policy will actually use, when idle.
+function verifyPeerInbound() {
+  if (peerInbound.verifiedAt || peerInbound.state !== 'applied' || peerInboundVerifying || contextChannel.active
+    || pending || controlPending || !state.canQuery(inputObserver.atBoundary)) return;
+  const mode = peerInbound.mode;
+  peerInboundVerifying = contextChannel.inboundPolicy()
+    .then(policy => { if (peerInbound.mode === mode) peerInbound = { ...peerInbound, effective: policy.value, decidedBy: policy.decidedBy, verifiedAt: new Date().toISOString() }; })
+    .catch(() => {})
+    .finally(() => { peerInboundVerifying = null; persist(); });
 }
 function reply(response, status, body) { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(body)); }
 async function readRequest(request) {
@@ -274,9 +323,9 @@ if (enabled) {
     server = createServer(async (request, response) => {
       try {
         if (!authorized(request)) return reply(response, 401, { error: 'Unauthorized' });
-        const controlsEnabled = await directoryStillEnabled();
+        const access = await readControlConfig(), controlsEnabled = access.controls;
         if (request.method === 'GET' && request.url === '/status') {
-          refreshRestartSelection();
+          refreshRestartSelection(); refreshCapacity(); void syncPeerInbound(access.acceptCrossMode);
           await quotaJournal?.restore(state);
           const snapshot = publicState();
           return reply(response, 200, { ...snapshot, controlsEnabled,
@@ -292,6 +341,7 @@ if (enabled) {
           if (body.action === 'cancel') { state.forgetPeer(body.messageId); persist(); return reply(response, 200, { status: 'cancelled' }); }
           if (quotaJournal?.pending || state.selectionPending) return reply(response, 200, { status: 'deferred', notSubmitted: true, reason: 'receiver_unavailable', detail: quotaJournal?.reason || '正在同步当前模型和思考设置，稍后自动重试。' });
           if (state.quota) return reply(response, 200, { status: 'deferred', notSubmitted: true, runtime: publicState() });
+          await Promise.race([syncPeerInbound(access.acceptCrossMode), new Promise(resolve => setTimeout(resolve, 3000))]);
           state.expectPeer(body.messageId); persist(); return reply(response, 200, { status: 'ready' });
         }
         if (request.method === 'GET' && request.url.startsWith('/context?')) {

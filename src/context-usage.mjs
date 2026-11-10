@@ -4,7 +4,19 @@ import { readdir, stat, open } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { homedir } from 'node:os';
 import { join, resolve, relative, isAbsolute } from 'node:path';
+import * as zlib from 'node:zlib';
 import { knownModel } from './model-identity.mjs';
+import { persistedMap } from './persisted-cache.mjs';
+
+// Codex compresses idle rollouts to .jsonl.zst. An archive does not change, so
+// its usage is computed once per (file, size, mtime) and kept across restarts.
+const archives = persistedMap();
+export function persistArchiveUsage(filename) { archives.persistTo(filename); }
+// Claude transcripts carry no capacity, so the recorded fallback is display
+// only. Its result depends on the last response and what follows it; the tail
+// of a transcript holds both, without parsing hundreds of MB of history.
+const CLAUDE_TAIL_BYTES = 4 * 1024 * 1024;
+const exists = filename => stat(filename).then(() => true, () => false);
 
 const count = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const sum = values => values.every(value => value !== null) ? values.reduce((a, b) => a + b, 0) : null;
@@ -122,6 +134,7 @@ export async function contextSourcePath({ client, id }) {
       const plain = path => path.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '');
       filename = plain(filename);
       const rel = relative(resolve(plain(home)), resolve(filename)); if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('Unexpected Codex log location.');
+      if (!await exists(filename) && await exists(filename + '.zst')) filename += '.zst';
     }
   }
   if (!filename) throw new Error('No saved usage source for the selected conversation.');
@@ -130,13 +143,22 @@ export async function contextSourcePath({ client, id }) {
 
 export class IncrementalContextReader {
   constructor(client, id) { this.client = client; this.id = id; this.offset = 0; this.pending = ''; this.decoder = new StringDecoder('utf8'); this.accumulator = createUsageAccumulator(client, id); }
+  reset() { this.offset = 0; this.pending = ''; this.decoder = new StringDecoder('utf8'); this.accumulator = createUsageAccumulator(this.client, this.id); this.windowed = false; this.skipPartial = false; }
   async read() {
     this.filename ||= await contextSourcePath({ client: this.client, id: this.id });
-    const info = await stat(this.filename);
-    if (info.size < this.offset || (this.birthtimeMs !== undefined && info.birthtimeMs !== this.birthtimeMs)) {
-      this.offset = 0; this.pending = ''; this.decoder = new StringDecoder('utf8'); this.accumulator = createUsageAccumulator(this.client, this.id);
+    // A resumed Codex session writes its rollout uncompressed again.
+    if (this.filename.endsWith('.zst')) {
+      if (!await exists(this.filename.slice(0, -4))) return this.readArchive();
+      this.filename = this.filename.slice(0, -4); this.reset();
     }
+    let info;
+    try { info = await stat(this.filename); }
+    catch (error) { if (error.code === 'ENOENT') this.filename = null; throw error; }
+    if (info.size < this.offset || (this.birthtimeMs !== undefined && info.birthtimeMs !== this.birthtimeMs)) this.reset();
     this.birthtimeMs = info.birthtimeMs;
+    if (this.client === 'claude' && this.offset === 0 && info.size > CLAUDE_TAIL_BYTES) {
+      this.offset = info.size - CLAUDE_TAIL_BYTES; this.windowed = true; this.skipPartial = true;
+    }
     const file = await open(this.filename, 'r');
     try {
       while (this.offset < info.size) {
@@ -144,11 +166,35 @@ export class IncrementalContextReader {
         const { bytesRead } = await file.read(buffer, 0, buffer.length, this.offset); if (!bytesRead) break;
         this.offset += bytesRead; const lines = (this.pending + this.decoder.write(buffer.subarray(0, bytesRead))).split('\n');
         this.pending = lines.pop();
+        // A window starts mid-line; that fragment is not a record.
+        if (this.skipPartial && lines.length) { lines.shift(); this.skipPartial = false; }
         for (const line of lines) { try { this.accumulator.add(JSON.parse(line)); } catch {} }
         if (this.pending.length > 32 * 1024 * 1024) throw new Error('上下文日志单行超过支持的大小。');
       }
     } finally { await file.close(); }
-    return { ...this.accumulator.result(), queriedAt: new Date().toISOString() };
+    const result = this.accumulator.result();
+    // Compactions before the window are unseen; do not claim the initial epoch.
+    return { ...result, ...(this.windowed && !result.lastCompactionAt ? { contextEpoch: 'unknown' } : {}), queriedAt: new Date().toISOString() };
+  }
+  async readArchive() {
+    let info;
+    try { info = await stat(this.filename); }
+    catch (error) { if (error.code === 'ENOENT') this.filename = null; throw error; }
+    const key = `${this.filename}|${info.size}|${info.mtimeMs}`;
+    await archives.load();
+    let result = archives.map.get(key);
+    if (!result) {
+      if (typeof zlib.createZstdDecompress !== 'function') throw new Error('读取 Codex 压缩记录需要 Node.js 22.15 或更新版本。');
+      const accumulator = createUsageAccumulator(this.client, this.id), source = createReadStream(this.filename), input = zlib.createZstdDecompress();
+      source.on('error', error => input.destroy(error)); source.pipe(input);
+      const lines = createInterface({ input, crlfDelay: Infinity });
+      try { for await (const line of lines) { try { accumulator.add(JSON.parse(line)); } catch {} } }
+      finally { lines.close(); source.destroy(); input.destroy(); }
+      result = accumulator.result();
+      for (const old of archives.map.keys()) if (old.startsWith(this.filename + '|')) archives.map.delete(old);
+      archives.map.set(key, result); archives.saveSoon();
+    }
+    return { ...result, queriedAt: new Date().toISOString() };
   }
 }
 

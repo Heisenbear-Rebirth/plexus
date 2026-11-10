@@ -150,10 +150,14 @@ export class CodexRuntime {
           unconfirmedSubmissions: projected.unconfirmedSubmissions });
         if (signature !== this.signature) { this.activityRevision++; this.signature = signature; }
         this.snapshot = { ...projected, activityRevision: this.activityRevision, streamRevision: change.revision, observedAt: new Date().toISOString() };
-        for (const resolve of this.waiters) resolve(this.snapshot); this.waiters.clear();
+        for (const waiter of this.waiters) waiter.resolve(this.snapshot); this.waiters.clear();
       } else if (change?.type === 'patches') this.dirty = true;
     };
-    this.onDisconnect = () => { this.snapshot = null; this.ownerId = null; };
+    this.onDisconnect = error => {
+      this.snapshot = null; this.ownerId = null;
+      for (const waiter of this.waiters) waiter.reject(error || new Error('CODEX_IPC_CLOSED'));
+      this.waiters.clear();
+    };
     this.ipc.on('broadcast', this.onBroadcast); this.ipc.on('disconnected', this.onDisconnect);
   }
   async connect() { await this.ipc.connect(); return this; }
@@ -178,10 +182,13 @@ export class CodexRuntime {
       this.ownerId = owner.handledByClientId;
       const snapshot = await new Promise((resolve, reject) => {
         let timer;
-        const done = value => { clearTimeout(timer); this.waiters.delete(done); resolve(value); };
-        timer = setTimeout(() => { this.waiters.delete(done); reject(new Error('CODEX_SNAPSHOT_TIMEOUT')); }, this.timeoutMs);
-        this.waiters.add(done);
-        try { this.ipc.following(this.id, this.ownerId); } catch (error) { clearTimeout(timer); this.waiters.delete(done); reject(error); }
+        const waiter = {
+          resolve: value => { clearTimeout(timer); this.waiters.delete(waiter); resolve(value); },
+          reject: error => { clearTimeout(timer); this.waiters.delete(waiter); reject(error); },
+        };
+        timer = setTimeout(() => waiter.reject(new Error('CODEX_SNAPSHOT_TIMEOUT')), this.timeoutMs);
+        this.waiters.add(waiter);
+        try { this.ipc.following(this.id, this.ownerId); } catch (error) { waiter.reject(error); }
       });
       const parallelUnverified = hasPendingSubagents(snapshot) || snapshot.goalStatus === 'active';
       return { ...base, ...snapshot, connected: true, instanceId: this.ownerId,
@@ -230,6 +237,7 @@ export class CodexRuntime {
   }
   close() {
     if (this.ipc.connected && this.ownerId) { try { this.ipc.following(this.id, this.ownerId, false); } catch {} }
+    this.onDisconnect(new Error('CODEX_IPC_CLOSED'));
     this.ipc.off('broadcast', this.onBroadcast); this.ipc.off('disconnected', this.onDisconnect); this.ipc.close();
   }
 }

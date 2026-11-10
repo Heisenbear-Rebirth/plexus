@@ -136,7 +136,7 @@ test('reviewer alias compatibility preserves real reviewer, policy, profile, roo
   assert.equal(samePermissionSelection({ ...v1, permissionFingerprintBasis: 'permission-selection-v2-implicit-workspace-root' }, initial), false);
 });
 
-async function harness(t) {
+async function harness(t, { disconnectOnFollow = false } = {}) {
   const requests = []; let current = state(), owner = 'native-owner'; const sockets = new Set();
   const server = createServer(socket => {
     sockets.add(socket); socket.on('close', () => sockets.delete(socket)); let buffered = Buffer.alloc(0);
@@ -156,6 +156,7 @@ async function harness(t) {
             const next = state('active', 'turn-two'); current = { ...current, threadRuntimeStatus: next.threadRuntimeStatus, turnHistory: next.turnHistory }; }
           send({ type: 'response', requestId: frame.requestId, resultType: 'success', handledByClientId: owner, result });
         } else if (frame.type === 'broadcast' && frame.params.following) {
+          if (disconnectOnFollow) { socket.destroy(); return; }
           const valid = { type: 'broadcast', sourceClientId: owner, method: 'thread-stream-state-changed', version: 11,
             params: { conversationId: sessionId, hostId: 'local', change: { type: 'snapshot', revision: 10, conversationState: current } } };
           send({ ...valid, sourceClientId: 'unrelated-owner', params: { ...valid.params, change: { type: 'snapshot', revision: 999, conversationState: state('active', 'wrong-turn') } } });
@@ -172,6 +173,14 @@ async function harness(t) {
     owner = 'restarted-owner'; for (const socket of sockets) socket.destroy();
   } };
 }
+
+test('a disconnected snapshot subscription reports the transport failure without waiting for a snapshot timeout', async t => {
+  const h = await harness(t, { disconnectOnFollow: true });
+  const result = await h.runtime.status();
+  assert.equal(result.connected, false);
+  assert.equal(result.activity, 'offline');
+  assert.equal(result.detail, 'CODEX_IPC_CLOSED');
+});
 
 for (const order of ['manager-first', 'client-first']) test(`Codex IPC reconnect after ${order} restart continues the persisted failed turn once with original settings`, async t => {
   const h = await harness(t), root = await mkdtemp(join(resolve('.cooperation'), 'codex-restart-'));

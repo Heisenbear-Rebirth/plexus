@@ -63,9 +63,9 @@ test('MCP exposes scoped lifecycle, message and checkpoint tools without discove
   child.stdin.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) + '\n');
   await new Promise((done, reject) => { child.on('error', reject); child.on('close', done); });
   const result = JSON.parse(output.trim()).result;
-  assert.deepEqual(result.tools.map((tool) => tool.name), ['send_message', 'context_checkpoint', 'create_session', 'connect_session']);
+  assert.deepEqual(result.tools.map((tool) => tool.name), ['send_message', 'context_checkpoint', 'session_interface', 'create_session', 'connect_session']);
   assert.deepEqual(Object.keys(result.tools[0].inputSchema.properties), ['to', 'message']);
-  for (const tool of result.tools.slice(2)) {
+  for (const tool of result.tools.slice(3)) {
     assert.equal(tool.inputSchema.additionalProperties, false);
     assert.ok(tool.inputSchema.required.includes('requestId'));
     assert.ok(tool.inputSchema.required.includes('directory'));

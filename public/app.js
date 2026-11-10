@@ -1,5 +1,7 @@
 import { setupPromptEditor } from './prompt-editor.mjs';
 import { setupRestartConfirmation } from './restart-confirmation.mjs';
+import { setupPeerSettings } from './peer-settings.mjs';
+import { setupSessionHook } from './session-hook.mjs';
 import { setupMotion, revealPanel, syncTabIndicator } from './ui-state.mjs';
 let { maintenanceView, maintenanceDiagnostic, quotaView, peerDeliveryView, accountQuotaExhausted } = await import('./maintenance-view.mjs');
 import { addressOf, clientName, autoCompressEnabled, projectMembers, workspaceAddresses, messageMatches, validThresholds, PolicySaver, directoryConnection, connectionGuidance, sessionConnected, openCodeContextState, reconcileChildren } from './ui-state.mjs';
@@ -10,7 +12,7 @@ const state = { config: null, bridge: null, online: true, mode: 'directories', d
   tab: 'overview', messages: [], selectedMessage: null, messageRequest: 0, scope: '', discoveryBusy: false, closed: false,
   editors: new Map(), cards: new Map(), connectionHelp: null, groupDraft: null, directoryDraft: null, events: null, discoveryReady: false, discoveryError: null };
 const activities = { idle: '空闲', running: '工作中', quota_limited: '等待额度', recovery_pending: '接续暂缓', peer_pending: '等待消息接收', waiting_permission: '等待权限', waiting_input: '等待答复', initializing: '初始化中', unloaded: '未加载', offline: '离线', unknown: '待确认' };
-const delivery = { submitted: '已发送到会话', queued: '等待发送', pending: '发送中', unknown: '需要确认', failed: '发送失败', held: '已暂存' };
+const delivery = { submitted: '已发送到会话', queued: '等待发送', pending: '发送中', unknown: '需要确认', failed: '发送失败', held: '已暂存', receiver_held: '接收端暂存', undelivered: '未送达' };
 const phases = { waiting_client: '等待客户端重连', interrupting: '正在暂停任务', writing_handoff: '保存交付文档', awaiting_handoff_end: '等待交付轮次结束', compacting: '正在压缩', restoring: '加载上文', awaiting_restore_end: '等待恢复轮次结束', needs_attention: '需要处理', user_intervened: '用户已介入', completed: '维护已完成', cancelled: '维护已取消' };
 const name = s => s.name || '未命名会话';
 const label = s => `${s.client}://${name(s)}:${s.id}`;
@@ -150,7 +152,7 @@ function visible() { return workspaceAddresses({project:currentProject(),session
 function updateScope() {
   const addresses=[...visible()].sort(), signature=JSON.stringify(addresses);
   $('message-scope').textContent=addresses.length?(state.selectedAddress?'当前会话':'当前项目 · '+addresses.length+' 个成员')+'的发送与接收记录':'当前范围没有可显示的会话';
-  if(signature!==state.scope){state.scope=signature;state.selectedMessage=null;state.messages=[];renderMessages();void loadMessages();}
+  if(signature!==state.scope){state.scope=signature;state.selectedMessage=null;state.messages=[];state.messageQuery=null;renderMessages();void loadMessages();}
 }
 function renderWorkspace() {
   ensureSelection(); const project=currentProject(),session=currentSession();
@@ -170,7 +172,7 @@ function renderWorkspace() {
     $('inspector').append(empty);return;
   }
   if(session){
-    $('workspace-actions').append(button('复制地址','button',()=>copy(label(session))),button('新建分组','button',()=>openGroup(null,session)));
+    $('workspace-actions').append(button('复制地址','button',()=>copy(label(session))),button('会话接口','button',()=>sessionHook.open(session)),button('新建分组','button',()=>openGroup(null,session)));
     if(session.missing)$('inspector').append(el('p','offline-note','此成员暂未在目录列表中发现。分组与通信历史仍保留，重新接入后恢复设置。'));
     $('inspector').append(buildCard(session));refreshCards();
   }else{
@@ -346,21 +348,24 @@ async function loadSessions(force=false){
   if(state.discoveryBusy||state.closed)return;state.discoveryBusy=true;
   try{
     const [dirs,groups]=await Promise.all([request('/api/directories'),request('/api/groups')]);
-    const result=await post('/api/sessions',{directoryIds:dirs.directories.map(d=>d.id)});if(state.closed)return;
+    // Periodic and announced refreshes reuse the service's recent scan; an explicit refresh scans again.
+    const result=await post('/api/sessions',{directoryIds:dirs.directories.map(d=>d.id),...(force===true?{}:{maxAgeMs:15000})});if(state.closed)return;
     const signature=JSON.stringify([dirs.directories,groups.groups,result.sessions.map(s=>[s.client,s.id,s.name,s.cwd,s.directoryIds])]);
     for(const session of result.sessions){const old=state.sessions.find(s=>addressOf(s)===addressOf(session));if(old){session.monitoring=old.monitoring||session.monitoring;if((old.policy?.revision||0)>(session.policy?.revision||0))session.policy=old.policy;}}
     state.directories=dirs.directories;state.groups=groups.groups;state.sessions=result.sessions;state.discoveryReady=true;state.discoveryError=null;
     for(const d of state.directories)d.error=result.directories?.find(r=>r.id===d.id)?.error;
     adoptProjects();if(signature!==state.signature){state.signature=signature;renderNavigation();renderWorkspace();updateScope();}else renderNavigation();
-    await loadMonitoring();setError('global-error',result.warnings?.join(' · ')||'');
+    await loadMonitoring();setError('global-error',[...(state.config?.warnings||[]),...(result.warnings||[])].join(' · '));
   }catch(error){state.discoveryError=error.message;setError('global-error','发现会话失败：'+error.message);renderNavigation();}finally{state.discoveryBusy=false;}
 }
 let monitoringBusy=false;
 const restartConfirmation = setupRestartConfirmation({ post, toast });
+const peerSettings = setupPeerSettings({ request, post, toast, getConfig: () => state.config, getSessions: () => state.sessions });
+const sessionHook = setupSessionHook({ post, toast, copy, getConfig: () => state.config });
 async function loadMonitoring(){if(state.closed||monitoringBusy)return;monitoringBusy=true;const restartRevision=restartConfirmation.revision();try{const result=await request('/api/monitoring',{signal:AbortSignal.timeout(8000)});if(state.closed)return;setServiceOnline(true);for(const sample of result.sessions){const s=state.sessions.find(s=>addressOf(s)===addressOf(sample.session));if(!s)continue;if((sample.policy?.revision||0)<(s.policy?.revision||0))sample.policy=s.policy;Object.assign(s,{monitoring:sample,policy:sample.policy,cycle:sample.cycle,lastCycle:sample.lastCycle,queueCount:sample.queueCount,queueState:sample.queueState});const value=state.editors.get(addressOf(s));if(value&&!value.editing&&!value.saver.running&&value.status!=='error'){value.draft=effective(s);value.saver.revision=s.policy?.revision||0;}}
     if(result.bootId && result.bootId!==state.config.bootId){const config=await request('/api/config');await refreshMaintenanceView(config.bootId);state.config=config;}
     restartConfirmation.update(result,restartRevision);
-    refreshCards();const navSig=JSON.stringify(state.sessions.map(s=>[addressOf(s),activity(s),connected(s)]));if(navSig!==state.navSig){state.navSig=navSig;renderNavigation();updateScope();}if(!state.selectedAddress)renderProjectOverview();if(state.connectionHelp)renderConnectionHelp();
+    refreshCards();peerSettings.refresh();const navSig=JSON.stringify(state.sessions.map(s=>[addressOf(s),activity(s),connected(s)]));if(navSig!==state.navSig){state.navSig=navSig;renderNavigation();updateScope();}if(!state.selectedAddress)renderProjectOverview();if(state.connectionHelp)renderConnectionHelp();
   }catch{void checkServiceHealth();}finally{monitoringBusy=false;}}
 function statusBadge(status){return el('span','delivery-badge '+status,delivery[status]||'待确认');}
 function routePart(s,direction){const row=el('div','message-route');row.append(el('span','route-direction',direction),el('strong','',name(s)),el('span','route-client',clientName(s.client)));row.title=label(s);return row;}
@@ -378,7 +383,10 @@ function renderMessages(){const addresses=visible(),query=$('message-search').va
   reconcileChildren($('message-list'),list.childNodes);
   const selected=messages.find(m=>m.id===state.selectedMessage);if(!selected)state.selectedMessage=null;renderDetail(selected);
 }
-async function loadMessages(){const id=++state.messageRequest,addresses=[...visible()];if(!addresses.length){state.messages=[];renderMessages();return;}try{const result=await request('/api/messages?'+new URLSearchParams({addresses:JSON.stringify(addresses)}));if(id!==state.messageRequest||state.closed)return;state.messages=result.messages;renderMessages();setError('message-error');}catch(error){if(id===state.messageRequest)setError('message-error',error.message);}}
+async function loadMessages(){const id=++state.messageRequest,addresses=[...visible()];if(!addresses.length){state.messages=[];state.messageQuery=null;renderMessages();return;}
+  // Repeat the last revision for the same query; the service then answers "unchanged" without the list.
+  const query=JSON.stringify(addresses),params={addresses:query};if(query===state.messageQuery&&state.messageRevision)params.revision=state.messageRevision;
+  try{const result=await request('/api/messages?'+new URLSearchParams(params));if(id!==state.messageRequest||state.closed)return;state.messageRevision=result.revision;if(!result.unchanged){state.messageQuery=query;state.messages=result.messages;renderMessages();}setError('message-error');}catch(error){if(id===state.messageRequest)setError('message-error',error.message);}}
 function showConnectionHelp(client,directoryId){state.connectionHelp={client,directoryId};renderConnectionHelp();$('connection-dialog').showModal();}
 function renderConnectionHelp(){const c=state.connectionHelp;if(!c)return;const directory=state.directories.find(d=>d.id===c.directoryId),status=directoryConnection({client:c.client,directory,sessions:state.sessions,bridge:state.bridge,online:state.online}),guide=connectionGuidance({client:c.client,directory,status,installationDirectory:state.config.installationDirectory});
   $('connection-help-title').textContent=guide.title;$('connection-help-scope').textContent=guide.scope;$('connection-help-summary').textContent=guide.summary;$('connection-help-steps').replaceChildren();
@@ -452,13 +460,13 @@ document.addEventListener('keydown',e=>{
     else if(!e.shiftKey&&(outside||document.activeElement===last)){e.preventDefault();first.focus();}
   }
 });
-let discoverTimer,monitorTimer,messageTimer,eventMonitorTimer,eventMessageTimer;
-function connectEvents(){state.events=new EventSource('/api/events');state.events.addEventListener('open',()=>{eventStreamOnline=true;setServiceOnline(true);void loadBridge();void loadMonitoring();void loadGroups();});state.events.addEventListener('error',()=>{eventStreamOnline=false;setServiceOnline(state.online);void checkServiceHealth();});state.events.addEventListener('bridge',e=>{try{renderBridge(JSON.parse(e.data));}catch{}});state.events.addEventListener('groups',()=>void loadGroups());state.events.addEventListener('management',()=>{if(!eventMonitorTimer)eventMonitorTimer=setTimeout(()=>{eventMonitorTimer=null;void loadMonitoring();},200);});state.events.addEventListener('message',()=>{clearTimeout(eventMessageTimer);eventMessageTimer=setTimeout(loadMessages,200);});}
-window.addEventListener('pagehide',()=>{state.closed=true;state.events?.close();for(const t of [discoverTimer,monitorTimer,messageTimer,eventMonitorTimer,eventMessageTimer])clearTimeout(t);});
+let discoverTimer,monitorTimer,messageTimer,eventMonitorTimer,eventMessageTimer,eventSessionsTimer;
+function connectEvents(){state.events=new EventSource('/api/events');state.events.addEventListener('open',()=>{eventStreamOnline=true;setServiceOnline(true);void loadBridge();void loadMonitoring();void loadGroups();});state.events.addEventListener('error',()=>{eventStreamOnline=false;setServiceOnline(state.online);void checkServiceHealth();});state.events.addEventListener('bridge',e=>{try{renderBridge(JSON.parse(e.data));}catch{}});state.events.addEventListener('groups',()=>void loadGroups());state.events.addEventListener('management',()=>{if(!eventMonitorTimer)eventMonitorTimer=setTimeout(()=>{eventMonitorTimer=null;void loadMonitoring();},200);});state.events.addEventListener('message',()=>{clearTimeout(eventMessageTimer);eventMessageTimer=setTimeout(loadMessages,200);});state.events.addEventListener('sessions',()=>{clearTimeout(eventSessionsTimer);eventSessionsTimer=setTimeout(()=>void loadSessions(),300);});}
+window.addEventListener('pagehide',()=>{state.closed=true;state.events?.close();for(const t of [discoverTimer,monitorTimer,messageTimer,eventMonitorTimer,eventMessageTimer,eventSessionsTimer])clearTimeout(t);});
 try{
   try{const saved=JSON.parse(localStorage.getItem('cooperation-workspace-v2'));if(saved){state.mode=saved.mode==='custom'?'custom':'directories';state.picks=saved.picks||state.picks;state.selectedAddress=saved.address||null;state.expanded=new Set(saved.expanded||[]);state.known=new Set(saved.known||[]);}state.connectedOnly=localStorage.getItem('cooperation-connected-only-v1')==='true';}catch{}
   state.config=await request('/api/config');$('version').textContent='v'+state.config.version;state.directories=state.config.directories||[];state.bridge=state.config.bridge?.codexStatus;await loadSessions(true);renderBridge(state.bridge);connectEvents();setMobileNavigation(false,{animate:false});
-  discoverTimer=setInterval(loadSessions,15000);monitorTimer=setInterval(loadMonitoring,2500);messageTimer=setInterval(loadMessages,10000);
+  discoverTimer=setInterval(loadSessions,15000);monitorTimer=setInterval(loadMonitoring,5000);messageTimer=setInterval(loadMessages,10000);
 }catch(error){setError('global-error','无法连接本地管理服务：'+error.message);$('connection-label').textContent='服务未连接';}
 
 setupPromptEditor({ request, post, toast });

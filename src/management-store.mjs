@@ -2,18 +2,23 @@ import { managerProcessAlive } from './manager-process.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { POLICY_DEFAULTS, validatePolicy } from './context-policy.mjs';
 import { matchesDirectories, containsDirectory } from './directory-service.mjs';
 import { restartCandidate } from './maintenance-recovery.mjs';
 import { RestartConfirmation } from './restart-confirmation.mjs';
 import { accountQuotaBlocked } from './quota-state.mjs';
+import { peerDeliveryEntries, peerDeliveryOutcome } from './peer-delivery.mjs';
 
 const json = value => JSON.stringify(value);
 const parse = row => row ? JSON.parse(row.data) : null;
 const now = () => new Date().toISOString();
 export const sessionKey = s => `${s.hostId || 'local'}:${s.client}:${s.id || s.sessionId}`;
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : json(value)).digest('hex');
+// Sampling times change on every observation. A snapshot whose remaining
+// content is unchanged is kept in memory only, not rewritten to disk.
+const VOLATILE = new Set(['observedAt', 'queriedAt', 'nextCheckAt', 'verifiedAt']);
+const stable = value => JSON.stringify(value, (key, item) => VOLATILE.has(key) ? undefined : item);
 
 export class ManagementStore {
   constructor(directory) { this.directory = directory; this.file = join(directory, 'management.sqlite'); this.warnings = []; this.managerToken = null; }
@@ -36,14 +41,24 @@ export class ManagementStore {
       CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, target_key TEXT NOT NULL, sequence INTEGER NOT NULL, priority INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS dispatch_order ON outbox(target_key,priority,sequence);
       CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, at TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_hooks (id TEXT PRIMARY KEY, session_key TEXT UNIQUE NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS cycles_by_session ON cycles(session_key);
       PRAGMA user_version=1;`);
+    this.snapshots = new Map(this.db.prepare('SELECT session_key, data FROM snapshots').all()
+      .map(row => [row.session_key, { data: row.data, signature: stable(JSON.parse(row.data)) }]));
+    this.messageRevision = 0; this.cycleRevision = 0;
     return this;
   }
   transaction(fn) {
     if (this.transactionDepth) return fn();
-    this.db.exec('BEGIN IMMEDIATE'); this.transactionDepth = 1;
+    this.db.exec('BEGIN IMMEDIATE'); this.transactionDepth = 1; this.snapshotWrites = new Set();
     try { const value = fn(); this.db.exec('COMMIT'); return value; }
-    catch (e) { this.db.exec('ROLLBACK'); throw e; } finally { this.transactionDepth = 0; }
+    catch (e) {
+      this.db.exec('ROLLBACK'); this.messageRevision++; this.cycleRevision++;
+      // A rolled-back snapshot write must be written again on the next sample.
+      for (const key of this.snapshotWrites) { const entry = this.snapshots.get(key); if (entry) entry.signature = null; }
+      throw e;
+    } finally { this.transactionDepth = 0; this.snapshotWrites = null; }
   }
   event(type, data) { this.db.prepare('INSERT INTO events(type,at,data) VALUES(?,?,?)').run(type, now(), json(data)); }
   getSetting(key) { return parse(this.db.prepare('SELECT data FROM settings WHERE key=?').get(key)); }
@@ -104,11 +119,13 @@ export class ManagementStore {
   getMessage(id) { return parse(this.db.prepare('SELECT data FROM messages WHERE id=?').get(id)); }
   create(message) {
     this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?,?)').run(message.id, sessionKey(message.to), message.sequence || 0, message.status, message.createdAt, json(message));
+    this.messageRevision++;
   }
   update(id, patch) {
     const message = this.getMessage(id); if (!message) throw new Error('消息不存在。');
     Object.assign(message, patch);
     this.db.prepare('UPDATE messages SET status=?,data=? WHERE id=?').run(message.status, json(message), id);
+    this.messageRevision++;
     return message;
   }
   list({ directories = [], directory = '', recursive = false, q = '', client = 'all' } = {}) {
@@ -141,11 +158,42 @@ export class ManagementStore {
     this.event('policy_saved', policy); return policy;
   }
   policies() { return this.db.prepare('SELECT data FROM policies').all().map(parse); }
+  // Returns whether anything other than sampling times changed. Only such a
+  // change is written; the latest sample is always served from memory.
   saveSnapshot(session, data) {
     this.restartConfirmation?.observe(data.session || session, data.runtime);
-    this.db.prepare('INSERT INTO snapshots VALUES(?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(sessionKey(session), json(data));
+    const key = sessionKey(session), text = json(data), signature = stable(data), changed = this.snapshots.get(key)?.signature !== signature;
+    if (changed) { this.db.prepare('INSERT INTO snapshots VALUES(?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(key, text); this.snapshotWrites?.add(key); }
+    this.snapshots.set(key, { data: text, signature });
+    return changed;
   }
-  getSnapshot(session) { return parse(this.db.prepare('SELECT data FROM snapshots WHERE session_key=?').get(sessionKey(session))); }
+  snapshotList() { return [...this.snapshots.values()].map(entry => JSON.parse(entry.data)); }
+  // One external interface per session. The key is "hk_<id>.<secret>"; the id
+  // is safe to log, the secret is compared in constant time.
+  sessionHook(session) { return parse(this.db.prepare('SELECT data FROM session_hooks WHERE session_key=?').get(sessionKey(session))); }
+  saveSessionHook(session, { rotate = false, enabled, createdBy = 'ui' } = {}) {
+    return this.transaction(() => {
+      const key = sessionKey(session), old = this.sessionHook(session), at = now();
+      const hook = old ? { ...old } : { id: randomBytes(8).toString('hex'), session, enabled: true, createdAt: at, createdBy, uses: 0, lastUsedAt: null };
+      if (!old || rotate) { hook.secret = randomBytes(24).toString('hex'); if (old) hook.rotatedAt = at; }
+      if (typeof enabled === 'boolean') hook.enabled = enabled;
+      hook.session = { client: session.client, id: session.id, name: session.name || hook.session?.name || null, cwd: session.cwd || hook.session?.cwd || null };
+      this.db.prepare('INSERT INTO session_hooks VALUES(?,?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(hook.id, key, json(hook));
+      if (!old || rotate || hook.enabled !== old.enabled) this.event('session_hook_saved', { id: hook.id, targetKey: key, enabled: hook.enabled, rotated: Boolean(old && rotate), createdBy });
+      return hook;
+    });
+  }
+  verifySessionHook(value) {
+    const match = /^hk_([0-9a-f]{16})\.([0-9a-f]{48})$/.exec(typeof value === 'string' ? value.trim() : '');
+    const hook = match && parse(this.db.prepare('SELECT data FROM session_hooks WHERE id=?').get(match[1]));
+    if (!hook?.secret || !timingSafeEqual(Buffer.from(hook.secret), Buffer.from(match[2]))) return null;
+    return hook;
+  }
+  touchSessionHook(hook) {
+    const current = parse(this.db.prepare('SELECT data FROM session_hooks WHERE id=?').get(hook.id)); if (!current) return;
+    this.db.prepare('UPDATE session_hooks SET data=? WHERE id=?').run(json({ ...current, uses: (current.uses || 0) + 1, lastUsedAt: now() }), hook.id);
+  }
+  getSnapshot(session) { return parse(this.snapshots.get(typeof session === 'string' ? session : sessionKey(session))); }
   mailbox(key) { this.db.prepare('INSERT OR IGNORE INTO mailboxes(session_key) VALUES(?)').run(key); return this.db.prepare('SELECT * FROM mailboxes WHERE session_key=?').get(key); }
   activeCycle(session) { return parse(this.db.prepare("SELECT data FROM cycles WHERE session_key=? AND state NOT IN ('completed','cancelled')").get(sessionKey(session))); }
   activeCycles() { return this.db.prepare("SELECT data FROM cycles WHERE state NOT IN ('completed','cancelled')").all().map(parse); }
@@ -156,7 +204,7 @@ export class ManagementStore {
       this.assertManager(); const key = sessionKey(data.session); const box = this.mailbox(key);
       if (box.locked_cycle || box.blocked || this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='sending'").get(key)) throw new Error('会话已有维护流程或未确认的投递。');
       const cycle = { ...data, id: data.id || randomUUID(), revision: 1, createdAt: now(), updatedAt: now() };
-      this.db.prepare('INSERT INTO cycles VALUES(?,?,?,?)').run(cycle.id, key, cycle.state, json(cycle));
+      this.db.prepare('INSERT INTO cycles VALUES(?,?,?,?)').run(cycle.id, key, cycle.state, json(cycle)); this.cycleRevision++;
       this.db.prepare('UPDATE mailboxes SET locked_cycle=? WHERE session_key=?').run(cycle.id, key);
       this.event('cycle_created', { id: cycle.id, session: cycle.session, state: cycle.state }); return cycle;
     });
@@ -165,7 +213,7 @@ export class ManagementStore {
     this.assertManager(); const current = this.cycle(id); if (!current) throw new Error('维护流程不存在。');
     if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error('维护流程版本已改变。');
     const next = { ...current, ...patch, state, revision: current.revision + 1, updatedAt: now() };
-    this.db.prepare('UPDATE cycles SET state=?,data=? WHERE id=?').run(state, json(next), id);
+    this.db.prepare('UPDATE cycles SET state=?,data=? WHERE id=?').run(state, json(next), id); this.cycleRevision++;
     this.event('cycle_state', { id, state, revision: next.revision }); return next;
   }
   checkpoint(cycleId, stage) { return parse(this.db.prepare('SELECT data FROM checkpoints WHERE cycle_id=? AND stage=?').get(cycleId, stage)); }
@@ -185,7 +233,7 @@ export class ManagementStore {
       this.assertManager(); const box = this.mailbox(key); if (box.locked_cycle || box.blocked) return null;
       if (this.restartConfirmation && !this.restartConfirmation.canDrain(key)) return null;
       const quota = this.getSetting('quota-recovery:' + key);
-      const snapshot = parse(this.db.prepare('SELECT data FROM snapshots WHERE session_key=?').get(key));
+      const snapshot = this.getSnapshot(key);
       if (snapshot?.runtime?.quota || accountQuotaBlocked(snapshot?.runtime) || ['waiting', 'sending', 'attention'].includes(quota?.state)) return null;
       if (this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='held'").get(key)) return null;
       if (this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='sending'").get(key)) return null;
@@ -219,12 +267,74 @@ export class ManagementStore {
     const resumeFailed = data.kind === 'resume' && result.status !== 'submitted';
     this.db.prepare('UPDATE outbox SET status=? WHERE id=?').run(uncertain ? 'unknown' : resumeFailed ? 'failed' : 'done', id);
     if (uncertain || resumeFailed) this.db.prepare('UPDATE mailboxes SET blocked=1 WHERE session_key=?').run(row.target_key);
-    if (data.kind === 'message') this.update(data.messageId, { ...result, detail: result.detail || null, error: result.error || null, completedAt: now() });
+    // A submitted Claude peer may already carry the receiver's native verdict.
+    const native = result.status === 'submitted' ? peerDeliveryOutcome(result.nativeDelivery) : null;
+    if (data.kind === 'message') this.update(data.messageId, { ...result, status: native?.status || result.status,
+      detail: native?.detail || result.detail || null, error: result.error || null, completedAt: now() });
     this.event('dispatch_result', { id, ...result });
     });
   }
+  observePeerDeliveries(session, runtime) {
+    // Native holds settle minutes after submission. Only Claude peer-inbox
+    // messages to this exact session move, and an undelivered result is final.
+    const key = sessionKey(session);
+    const read = entry => parse(this.db.prepare("SELECT data FROM messages WHERE id=? AND target_key=? AND status IN ('submitted','receiver_held')").get(entry.messageId, key));
+    const changes = entry => {
+      const message = read(entry), previous = message?.nativeDelivery;
+      if (message?.transport !== 'claude-peer-inbox' || !peerDeliveryOutcome(entry)) return null;
+      if (previous?.state === entry.state && previous?.cause === entry.cause && previous?.outcome === entry.outcome) return null;
+      // An ordinary acceptance needs no rewrite; it only clears an earlier hold.
+      return ['released', 'received'].includes(entry.state) && !['held', 'released'].includes(previous?.state) ? null : message;
+    };
+    const pending = peerDeliveryEntries(runtime).filter(changes);
+    if (!pending.length) return [];
+    return this.transaction(() => {
+      this.assertManager(); const changed = [];
+      for (const entry of pending) {
+        const message = changes(entry); if (!message) continue;
+        const outcome = peerDeliveryOutcome(entry);
+        const nativeDelivery = Object.fromEntries(['state', 'cause', 'outcome', 'heldAt', 'observedAt'].filter(k => entry[k] !== undefined).map(k => [k, entry[k]]));
+        this.update(message.id, { status: outcome.status, detail: outcome.detail, nativeDelivery });
+        this.event('peer_delivery_observed', { id: message.id, targetKey: key, ...nativeDelivery }); changed.push(message.id);
+      }
+      return changed;
+    });
+  }
+  // Whole-table views for the monitoring list: one query each instead of
+  // several per session. The latest cycle per session is reused until one changes.
+  lastCycles() {
+    if (this.lastCycleCache?.revision !== this.cycleRevision) this.lastCycleCache = { revision: this.cycleRevision, cycles: new Map(this.db
+      .prepare('SELECT session_key, data FROM cycles WHERE rowid IN (SELECT max(rowid) FROM cycles GROUP BY session_key)').all().map(row => [row.session_key, parse(row)])) };
+    return this.lastCycleCache.cycles;
+  }
+  queueStates() {
+    const states = new Map();
+    for (const row of this.db.prepare("SELECT target_key, status, count(*) AS n FROM outbox WHERE status<>'done' GROUP BY target_key, status").all())
+      states.set(row.target_key, { ...states.get(row.target_key), [row.status]: row.n });
+    return states;
+  }
   queueCount(session) { return this.db.prepare("SELECT count(*) AS n FROM outbox WHERE target_key=? AND status<>'done'").get(sessionKey(session)).n; }
   queueState(session) { return Object.fromEntries(this.db.prepare("SELECT status,count(*) AS n FROM outbox WHERE target_key=? AND status<>'done' GROUP BY status").all(sessionKey(session)).map(row => [row.status, row.n])); }
+  unknownMessages(key) {
+    return this.db.prepare("SELECT m.data FROM outbox o JOIN messages m ON m.id=o.id WHERE o.target_key=? AND o.status='unknown' ORDER BY o.sequence").all(key).map(parse);
+  }
+  confirmNativeDelivery(id, receipt) {
+    return this.transaction(() => {
+      this.assertManager();
+      const row = this.db.prepare("SELECT * FROM outbox WHERE id=? AND status='unknown'").get(id);
+      if (!row) return false;
+      const item = parse(row), message = this.getMessage(id);
+      if (item.kind !== 'message' || item.to.client !== 'codex' || receipt?.kind !== 'codex-native-receipt'
+        || receipt.messageId !== id || receipt.sessionId !== item.to.id || !/^[a-f0-9]{64}$/.test(receipt.contentHash || '')
+        || !(Date.parse(receipt.receivedAt) >= Date.parse(message.createdAt))) throw Error('原生投递回执与消息不匹配。');
+      this.db.prepare("UPDATE outbox SET status='done' WHERE id=?").run(id);
+      this.update(id, { status: 'submitted', detail: '已从接收会话核对完整消息，自动恢复队列。', error: null,
+        deliveryReceipt: receipt, submittedAt: receipt.receivedAt, completedAt: now() });
+      const uncertain = this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status IN ('unknown','failed')").get(row.target_key);
+      this.db.prepare('UPDATE mailboxes SET blocked=? WHERE session_key=?').run(uncertain ? 1 : 0, row.target_key);
+      this.event('delivery_reconciled', { id, receipt }); return true;
+    });
+  }
   resolveDelivery(id, outcome) {
     return this.transaction(() => {
       const row = this.db.prepare('SELECT * FROM outbox WHERE id=?').get(id);
@@ -248,7 +358,7 @@ export class ManagementStore {
       this.event('held_messages_released', { targetKey: key }); return key;
     });
   }
-  readyTargets() { return this.db.prepare("SELECT DISTINCT target_key FROM outbox WHERE status='ready'").all().map(r => r.target_key); }
+  readyTargets() { return this.db.prepare("SELECT DISTINCT target_key FROM outbox WHERE status IN ('ready','unknown')").all().map(r => r.target_key); }
   releaseCycle(cycleId, { resumeText, cancel = false, releaseMessages = true } = {}) {
     return this.transaction(() => {
       this.assertManager(); const cycle = this.cycle(cycleId); if (!cycle) throw new Error('维护流程不存在。');

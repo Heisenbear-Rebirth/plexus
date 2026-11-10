@@ -15,7 +15,7 @@ const emit = message => {
 };
 if (process.argv.includes('--show-args')) { emit({ args: process.argv.slice(2) }); process.exit(0); }
 let permissionRequest, checkpointRequest;
-let selectedEffort = 'high';
+let selectedEffort = 'high', flagSettings = {};
 const foldedInputs = [];
 async function quotaUtilization() {
   try { const value = JSON.parse(await readFile('quota-utilization.json', 'utf8')).value; if (Number.isFinite(value)) return value; } catch {}
@@ -58,12 +58,24 @@ createInterface({ input: process.stdin }).on('line', async line => {
   }
   if (message.type === 'control_request') {
     if (message.request.subtype === 'apply_flag_settings' && Object.hasOwn(message.request.settings || {}, 'effort')) selectedEffort = message.request.settings.effort;
+    if (message.request.subtype === 'apply_flag_settings') {
+      // Native semantics: shallow merge into the session flag layer; null removes a key.
+      for (const [key, value] of Object.entries(message.request.settings || {})) if (value === null) delete flagSettings[key]; else flagSettings[key] = value;
+      if (Object.hasOwn(message.request.settings || {}, 'crossSessionInbound')) {
+        emit({ type: 'fixture_flag_settings', settings: { ...flagSettings }, requestId: message.request_id });
+        if (process.env.COOP_FIXTURE_REJECT_FLAGS === '1') { emit({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'fixture rejected' } }); return; }
+        emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id } }); return;
+      }
+    }
     if (message.request.subtype === 'get_settings') {
       emit({ type: 'fixture_settings_request' });
       if (process.env.COOP_FIXTURE_SETTINGS_DELAY_MS) await new Promise(r => setTimeout(r, Number(process.env.COOP_FIXTURE_SETTINGS_DELAY_MS)));
       emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {
         applied: { model: process.env.COOP_FIXTURE_SELECTED_MODEL || 'fixture', effort: selectedEffort },
         merged: { env: { PRIVATE_FIXTURE_TOKEN: 'must-not-leave-native-channel' } },
+        sources: [{ source: 'userSettings', settings: { env: { PRIVATE_FIXTURE_TOKEN: 'must-not-leave-native-channel' } } },
+          ...(Object.keys(flagSettings).length ? [{ source: 'flagSettings', settings: { ...flagSettings } }] : []),
+          ...(process.env.COOP_FIXTURE_POLICY_INBOUND ? [{ source: 'policySettings', settings: { crossSessionInbound: process.env.COOP_FIXTURE_POLICY_INBOUND } }] : [])],
       } } }); return;
     }
     if (message.request.subtype === 'interrupt') {
@@ -73,6 +85,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
       return;
     }
     if (message.request.subtype === 'get_context_usage') {
+      emit({ type: 'fixture_context_request', detail: message.request.detail ?? null });
       emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: { model: 'fixture', totalTokens: 30000, rawMaxTokens: 200000, percentage: 15, memoryFiles: [{ path: 'private', content: 'not-returned' }], categories: [{ name: 'Messages', tokens: 30000 }] } } });
       return;
     }

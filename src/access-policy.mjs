@@ -22,7 +22,17 @@ export class DirectoryAccessPolicy {
     if (!this.permits(directory, recursive)) throw Object.assign(new Error('目标目录受保护，禁止发现、读取和会话操作。'), { code: 'DIRECTORY_PROTECTED', outcome: 'not_submitted' });
   }
 }
-export async function readAccessPolicy(root = installationRoot) {
+// Read on every sample and send; an operator's edit applies within a second.
+const policies = new Map();
+export function readAccessPolicy(root = installationRoot) {
+  const cached = policies.get(root);
+  if (cached && Date.now() - cached.at < 1000) return cached.policy;
+  const policy = loadAccessPolicy(root);
+  policies.set(root, { at: Date.now(), policy });
+  policy.catch(() => { if (policies.get(root)?.policy === policy) policies.delete(root); });
+  return policy;
+}
+async function loadAccessPolicy(root) {
   // Product policy configured by the operator only. Restrictions on a coding
   // agent's own file access must never be copied into this runtime denylist.
   let input;

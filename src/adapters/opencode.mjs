@@ -6,7 +6,10 @@ import { readAccessPolicy } from '../access-policy.mjs';
 
 export function createOpenCodeAdapter({ root = installationRoot, timeout = 15000 } = {}) {
   const folder = join(root, '.cooperation', 'opencode', 'instances');
-  async function records() {
+  // Concurrent directory scans share one read of the registrations.
+  let recordsRead = null;
+  function records() { return recordsRead ||= readRecords().finally(() => { recordsRead = null; }); }
+  async function readRecords() {
     const access = await readAccessPolicy();
     const result = [];
     for (const name of await readdir(folder).catch(e => { if (e.code === 'ENOENT') return []; throw e; })) {

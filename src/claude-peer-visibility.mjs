@@ -1,6 +1,8 @@
 // Presentation only: these bytes go to the IDE, never back to Claude.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENVELOPE = /^发送方：(codex|claude|opencode):\/\/[^\r\n]+:([a-zA-Z0-9_-]{8,128})\r?\n发送方地址：(codex|claude|opencode):([a-zA-Z0-9_-]{8,128})\r?\n消息编号：([0-9a-f-]{36})\r?\n\r?\n/gm;
+// A program calling a session interface has no reply address (see messageEnvelope).
+const EXTERNAL = /^发送方：外部程序「[^\r\n]*」（会话接口 [0-9a-f]{16}）\r?\n说明：[^\r\n]*\r?\n消息编号：([0-9a-f-]{36})\r?\n\r?\n/gm;
 
 export function visiblePeerMessage(message, sessionId, label = '【Cooperation 会话消息】') {
   if (!UUID.test(sessionId || '') || message?.session_id?.toLowerCase?.() !== sessionId.toLowerCase()
@@ -10,10 +12,12 @@ export function visiblePeerMessage(message, sessionId, label = '【Cooperation �
   if (typeof content !== 'string' && (!Array.isArray(content) || !content.length
     || content.some(block => block?.type !== 'text' || typeof block.text !== 'string'))) return message;
   const text = typeof content === 'string' ? content : content.map(block => block.text).join('\n');
-  const matches = [...text.matchAll(ENVELOPE)];
-  if (matches.length !== 1) return message;
-  const [, client, sender, addressClient, addressId, id] = matches[0];
-  if (client !== addressClient || sender !== addressId || id.toLowerCase() !== message.uuid.toLowerCase()) return message;
+  const matches = [...text.matchAll(ENVELOPE)], external = [...text.matchAll(EXTERNAL)];
+  if (matches.length + external.length !== 1) return message;
+  if (matches.length) {
+    const [, client, sender, addressClient, addressId, id] = matches[0];
+    if (client !== addressClient || sender !== addressId || id.toLowerCase() !== message.uuid.toLowerCase()) return message;
+  } else if (external[0][1].toLowerCase() !== message.uuid.toLowerCase()) return message;
   const selected = typeof label === 'function' ? label() : label;
   const prefix = selected ? selected + '\n' : '';
   const labelled = prefix && text.startsWith(prefix);
@@ -42,7 +46,8 @@ export class PeerMessageVisibility {
       if (!this.passthrough) {
         const line = this.parts.length === 1 ? this.parts[0] : Buffer.concat(this.parts, this.size);
         let output = line;
-        try {
+        // Only replayed peer messages are rewritten; other lines need no parse.
+        if (line.includes('"isReplay"')) try {
           const original = JSON.parse(line.toString('utf8'));
           const projected = visiblePeerMessage(original, this.sessionId(), this.label);
           if (projected !== original) {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { startServer } from '../src/http-server.mjs';
+import { readWrapperDirectories, wrapperEnabledFor } from '../src/wrapper-directories.mjs';
 
 test('management HTTP persists multiple roots and policies, limits mutations to the UI, and hides receipt secrets', async t => {
   const root = await mkdtemp(join(resolve('.'), '.http-test-')); const child = join(root, 'child'); await mkdir(child);
@@ -31,4 +32,32 @@ test('management HTTP persists multiple roots and policies, limits mutations to 
   assert.equal((await post('/api/directories/remove', { id: directories.directory.id })).status, 400);
   const connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8'));
   assert.equal(config.token, undefined); assert.ok(connection.token);
+});
+
+test('recursive project control is inherited by discovered Claude children and cannot be revoked during their maintenance', async t => {
+  const root = await mkdtemp(join(resolve('.'), '.http-test-recursive-')), child = join(root, 'author'); await mkdir(child);
+  const session = { client: 'claude', id: '22222222-2222-4222-8222-222222222222', name: 'author', cwd: child };
+  const server = await startServer({ root, port: 0, startMonitoring: false, adapters: { claude: {
+    find: async () => session, list: async () => ({ sessions: [session], warnings: [] }),
+  } } });
+  t.after(async () => { await server.close(); assert.ok(root.startsWith(resolve('.') + '\\') || root.startsWith(resolve('.') + '/')); await rm(root, { recursive: true, force: true }); });
+  const config = await (await fetch(server.url + '/api/config')).json();
+  const post = (path, body) => fetch(server.url + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-coop-ui': config.csrfToken }, body: JSON.stringify(body) });
+  const parent = (await (await post('/api/directories', { path: root, recursive: true })).json()).directory;
+  assert.equal((await post('/api/directories/claude-control', { id: parent.id, enabled: true })).status, 200);
+  const sessions = await (await post('/api/sessions', { directoryIds: [parent.id] })).json();
+  assert.equal(sessions.sessions[0].controlAccess.directoryEnabled, true);
+  assert.equal(server.store.directories().length, 1, 'No separate child project is needed');
+  const cycle = server.store.createCycle({ session, state: 'writing_handoff' });
+  assert.equal((await post('/api/directories', { path: root, recursive: false })).status, 400);
+  assert.equal((await post('/api/directories/claude-control', { id: parent.id, enabled: false })).status, 400);
+  assert.equal(server.store.directories()[0].recursive, true);
+  assert.equal(wrapperEnabledFor(await readWrapperDirectories(root), child), true);
+  server.store.releaseCycle(cycle.id, { cancel: true, releaseMessages: false });
+  assert.equal((await post('/api/directories', { path: root, recursive: false })).status, 200);
+  assert.equal(wrapperEnabledFor(await readWrapperDirectories(root), child), false);
+  assert.equal((await post('/api/directories', { path: root, recursive: true })).status, 200);
+  assert.equal(wrapperEnabledFor(await readWrapperDirectories(root), child), true);
+  assert.equal((await post('/api/directories/remove', { id: parent.id })).status, 200);
+  assert.equal(wrapperEnabledFor(await readWrapperDirectories(root), child), false);
 });

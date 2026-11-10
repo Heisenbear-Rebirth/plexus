@@ -14,14 +14,15 @@ function validContext(value) {
 export function codexContextFromEnvironment(env = process.env, callerThreadId = env.CODEX_THREAD_ID) {
   return validContext({ pipePath: env.CODEX_APP_TOOLS_PIPE_PATH, callerThreadId, ...(env.CODEX_MCP_NODE_PATH ? { nodePath: env.CODEX_MCP_NODE_PATH } : {}) });
 }
-async function savedContext(root) {
+async function savedContexts(root) {
   try {
     const text = await readFile(filename(root), 'utf8');
-    if (Buffer.byteLength(text) > 16384) return null;
+    if (Buffer.byteLength(text) > 65536) return [];
     const record = JSON.parse(text);
-    return record.version === 1 ? validContext(record.context) : null;
-  } catch { return null; }
+    return record.version === 1 ? [record.context, ...(Array.isArray(record.contexts) ? record.contexts.slice(0, 16) : [])].map(validContext).filter(Boolean) : [];
+  } catch { return []; }
 }
+async function savedContext(root) { return (await savedContexts(root))[0] || null; }
 export async function rememberCodexEnvironment(root, env = process.env) {
   // An app-wide MCP process may not have a current turn. Reuse only the
   // previously authorized caller from this project's connection, never a
@@ -31,11 +32,13 @@ export async function rememberCodexEnvironment(root, env = process.env) {
 }
 export async function rememberCodexBridge(root, context = codexContextFromEnvironment()) {
   const selected = validContext(context); if (!selected) return false;
-  if (JSON.stringify(await savedContext(root)) === JSON.stringify(selected)) return true;
+  const previous = await savedContexts(root);
+  if (JSON.stringify(previous[0]) === JSON.stringify(selected)) return true;
+  const contexts = [...new Map([selected, ...previous].map(value => [JSON.stringify(value), value])).values()].slice(0, 16);
   const file = filename(root), temporary = file + '.' + randomUUID() + '.tmp';
   await mkdir(join(root, '.cooperation'), { recursive: true });
   try {
-    await writeFile(temporary, JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), context: selected }) + '\n', { mode: 0o600 });
+    await writeFile(temporary, JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), context: selected, contexts }) + '\n', { mode: 0o600 });
     await rename(temporary, file);
   } finally { await unlink(temporary).catch(() => {}); }
   return true;
@@ -68,7 +71,7 @@ export class CodexBridgeConnection {
     this.inFlight = this.check().finally(() => { this.inFlight = null; }); return this.inFlight;
   }
   async check() {
-    const candidates = [await savedContext(this.root), this.context, this.startupContext].filter(Boolean);
+    const candidates = [...await savedContexts(this.root), this.context, this.startupContext].filter(Boolean);
     const seen = new Set();
     for (const candidate of candidates) {
       const key = JSON.stringify(candidate); if (seen.has(key)) continue; seen.add(key);
@@ -79,10 +82,20 @@ export class CodexBridgeConnection {
     }
     this.setState(false, candidates.length > 0); return this.status();
   }
-  async getContext() {
+  async getContext({ excludeThreadId } = {}) {
     await this.refresh();
     if (!this.state.connected) throw Object.assign(new Error(this.state.detail), { code: 'CODEX_CONNECTION_UNAVAILABLE', outcome: 'not_submitted', retryable: false });
-    return { ...this.context };
+    if (!excludeThreadId || this.context.callerThreadId.toLowerCase() !== excludeThreadId.toLowerCase()) return { ...this.context };
+    // A Claude relay must not use its Codex recipient as the tool caller.
+    // Retain real captured callers; never invent an identity for this purpose.
+    const candidates = [...await savedContexts(this.root), this.startupContext].filter(Boolean);
+    const seen = new Set();
+    for (const candidate of candidates) {
+      if (candidate.callerThreadId.toLowerCase() === excludeThreadId.toLowerCase()) continue;
+      const key = JSON.stringify(candidate); if (seen.has(key)) continue; seen.add(key);
+      try { await this.probe(candidate); return { ...candidate }; } catch {}
+    }
+    throw Object.assign(new Error('等待独立的 Codex 发送连接，消息已保留。'), { code: 'CODEX_RELAY_CALLER_UNAVAILABLE', outcome: 'not_submitted' });
   }
   invalidate() { this.setState(false); }
   async close() { this.closed = true; clearInterval(this.timer); await this.inFlight; }

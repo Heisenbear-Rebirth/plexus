@@ -36,7 +36,7 @@ export class ClaudeProtocolState {
     this.capacities = new Map(); this.usage = null; this.contextEpoch = 0; this.backgroundTasks = new Set();
     this.quota = null; this.turnQuotaEvent = null; this.turnQuotaError = false; this.userStopped = false;
     this.expectedPeers = new Set();
-    this.peerHolds = new Map(); this.lastPeerDelivery = null;
+    this.peerHolds = new Map(); this.lastPeerDelivery = null; this.peerOutcomes = new Map();
     this.lastObservedInputId = null; this.lastQuotaAssistantId = null;
     this.selectionKnown = new Set();
     this.selectionPending = false;
@@ -54,14 +54,21 @@ export class ClaudeProtocolState {
     const key = id.toLowerCase();
     if (!this.expectedPeers.has(key)) {
       this.expectedPeers.add(key); this.activityRevision++;
-      this.lastPeerDelivery = { messageId: key, state: 'pending', observedAt: new Date().toISOString() };
+      this.recordPeer({ messageId: key, state: 'pending', observedAt: new Date().toISOString() });
     }
+  }
+  recordPeer(entry, latest = true) {
+    // Keep each recent message's latest native outcome; one latest-only field
+    // loses a drop when another message settles before the next poll.
+    if (latest) this.lastPeerDelivery = entry;
+    this.peerOutcomes.delete(entry.messageId); this.peerOutcomes.set(entry.messageId, entry);
+    while (this.peerOutcomes.size > 32) this.peerOutcomes.delete(this.peerOutcomes.keys().next().value);
   }
   forgetPeer(id) {
     const key = id?.toLowerCase(); this.peerHolds.delete(key);
     if (this.expectedPeers.delete(key)) {
       this.activityRevision++;
-      if (this.lastPeerDelivery?.messageId === key) this.lastPeerDelivery = { messageId: key, state: 'cancelled', observedAt: new Date().toISOString() };
+      this.recordPeer({ messageId: key, state: 'cancelled', observedAt: new Date().toISOString() }, this.lastPeerDelivery?.messageId === key);
     }
   }
   observePeerHold(message) {
@@ -75,7 +82,7 @@ export class ClaudeProtocolState {
     if (message.state === 'held') this.peerHolds.set(id, entry);
     else this.peerHolds.delete(id);
     if (message.state === 'dropped') this.forgetPeer(id);
-    this.lastPeerDelivery = entry; this.activityRevision++;
+    this.recordPeer(entry); this.activityRevision++;
   }
   begin(id) {
     if (!this.active) {
@@ -129,7 +136,7 @@ export class ClaudeProtocolState {
     if (message.type === 'user' && message.origin?.kind === 'peer' && message.message?.role === 'user' && typeof message.uuid === 'string'
       && this.expectedPeers.has(message.uuid?.toLowerCase())) {
       this.forgetPeer(message.uuid);
-      this.lastPeerDelivery = { messageId: message.uuid.toLowerCase(), state: 'received', observedAt: new Date().toISOString() };
+      this.recordPeer({ messageId: message.uuid.toLowerCase(), state: 'received', observedAt: new Date().toISOString() });
       this.lastObservedInputId = message.uuid;
       if (!this.active) { this.quota = null; this.turnQuotaEvent = null; this.turnQuotaError = false; this.begin(message.uuid); }
       if (this.usage) this.usage.historyChangedAfterMeasurement = true;
@@ -211,6 +218,15 @@ export class ClaudeProtocolState {
     this.usage.contextWindowTokens = capacity;
     this.usage.usedPercent = capacity ? Math.round(this.usage.usedTokens * 10000 / capacity) / 100 : null;
   }
+  // A mid-turn read supplies only the window size; passive usage stays the
+  // per-response measurement. The response may omit the [1m] selection suffix.
+  observeCapacity(native) {
+    if (!(native?.contextWindowTokens > 0) || !native.model) return false;
+    this.capacities.set(native.model, native.contextWindowTokens);
+    const plain = model => String(model || '').replace(/\[1m\]$/, '');
+    if (this.usage && plain(this.usage.model) === plain(native.model)) { this.capacities.set(this.usage.model, native.contextWindowTokens); this.applyCapacity(); }
+    return true;
+  }
   observeNativeUsage(usage) {
     if (usage.model && usage.contextWindowTokens > 0) this.capacities.set(usage.model, usage.contextWindowTokens);
     this.usage = { ...usage, measuredAt: usage.queriedAt, contextEpoch: this.contextEpoch, historyChangedAfterMeasurement: false };
@@ -247,5 +263,6 @@ export class ClaudeProtocolState {
     inputEnded: this.inputEnded, lastResultAt: this.lastResultAt, permissionMode: this.permissionMode, model: this.model, effort: this.effort,
     modelSelectionSource: this.modelSelectionSource, selectionKnown: [...this.selectionKnown], selectionPending: this.selectionPending,
     pendingPeerMessages: this.expectedPeers.size, peerDelivery: this.peerHolds.values().next().value || this.lastPeerDelivery,
+    peerDeliveries: [...this.peerOutcomes.values()],
     userStopped: this.userStopped, quota: this.quota, usage: this.usage }; }
 }

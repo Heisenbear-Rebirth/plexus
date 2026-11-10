@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { stat, realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { parseAddress, publicSession, messageEnvelope } from './address.mjs';
+import { parseAddress, publicSession, messageEnvelope, externalSender } from './address.mjs';
 import { listClaudeSessions, findClaudeSession } from './adapters/claude.mjs';
 import { listCodexSessions, findCodexSession, sendCodexMessage } from './adapters/codex.mjs';
 import { SessionMailbox } from './session-mailbox.mjs';
@@ -17,11 +17,13 @@ import { applyMessageAffixes } from '../public/prompt-templates.mjs';
 import { senderPeerPermissionClass } from './peer-permissions.mjs';
 import { CodexAccountQuota } from './codex-account-quota.mjs';
 import { accountQuotaBlocked } from './quota-state.mjs';
+import { CodexDeliveryReceipts } from './codex-delivery-receipts.mjs';
 
 export class CooperationService {
   constructor({ store, root, codexContext, codexBridge, onMessage = () => {}, adapters, lifecycleDirectories, runtimeFactory, accessPolicy } = {}) {
     this.accessPolicy = accessPolicy;
     this.store = store; this.root = root; this.codexContext = codexContext; this.codexBridge = codexBridge; this.onMessage = onMessage;
+    this.hookCalls = new Map();
     this.adapters = adapters || {
       claude: { list: listClaudeSessions, find: findClaudeSession, send: sendVisibleClaudeMessage, ...createClaudeNativeUi({ root }) },
       codex: { list: listCodexSessions, find: findCodexSession, send: sendCodexMessage },
@@ -33,9 +35,14 @@ export class CooperationService {
     // Injected transports may provide their own runtime. Production Codex
     // deliveries read the existing native owner; the send still uses App Tools.
     this.deliveryRuntimeFactory = runtimeFactory || (!adapters ? this.runtimeFactory : null);
+    const deliveryReceipts = !adapters ? new CodexDeliveryReceipts() : null;
     if (store?.reserveLifecycle) this.lifecycle = new SessionLifecycle({ store, root, adapters: this.adapters, directories: lifecycleDirectories, accessPolicy,
       runtimeFactory: this.runtimeFactory });
     if (store?.admit) this.mailbox = new SessionMailbox({ store, onMessage,
+      reconcileMessage: deliveryReceipts ? async record => {
+        const access = this.accessPolicy || await readAccessPolicy(); access.assert(record.to.cwd);
+        return deliveryReceipts.find(record, (await this.deliveryPayload(record)).text);
+      } : undefined,
       deliverMessage: async record => {
         const access = this.accessPolicy || await readAccessPolicy(); access.assert(record.from.cwd); access.assert(record.to.cwd);
         if (record.to.client === 'codex' && this.deliveryRuntimeFactory) {
@@ -48,7 +55,14 @@ export class CooperationService {
           } catch { /* An unavailable observer is not evidence of exhausted quota. */ }
           finally { runtime?.close?.(); }
         }
-        const context = record.to.client === 'codex' && this.codexBridge ? await this.codexBridge.getContext() : this.codexContext;
+        let context = this.codexContext;
+        if (record.to.client === 'codex' && this.codexBridge) {
+          try { context = await this.codexBridge.getContext(record.from.client !== 'codex' ? { excludeThreadId: record.to.id } : {}); }
+          catch (error) {
+            if (error.code === 'CODEX_RELAY_CALLER_UNAVAILABLE') return { status: 'deferred', notSubmitted: true, reason: 'relay_caller', detail: error.message };
+            throw error;
+          }
+        }
         try { return await this.adapters[record.to.client].send({ ...await this.deliveryPayload(record), context }); }
         catch (error) { if (record.to.client === 'codex') this.codexBridge?.invalidate(); throw error; }
       },
@@ -67,7 +81,7 @@ export class CooperationService {
     const envelope = messageEnvelope(record.from, record.text, record.id);
     return { targetId: record.to.id, targetSession: record.to, messageId: record.id,
       text: record.to.client === 'opencode' ? envelope : applyMessageAffixes(envelope, affixes),
-      ...(record.to.client === 'claude' && this.deliveryRuntimeFactory ? {
+      ...(record.to.client === 'claude' && this.deliveryRuntimeFactory && record.from.client !== 'external' ? {
         readSenderPermissionClass: async () => {
           let runtime;
           try { runtime = this.deliveryRuntimeFactory(record.from); return senderPeerPermissionClass(record.from, await runtime.status()); }
@@ -77,11 +91,21 @@ export class CooperationService {
       } : {}),
       ...(record.to.client === 'opencode' ? { messageAffixes: { prefix: affixes.prefix, suffix: affixes.suffix } } : {}) };
   }
-  async sessions({ directory, directories, recursive = false }) {
+  // The monitor discovers every 15 s and announces changes; the page's periodic
+  // refresh may reuse that scan (maxAgeMs). Store-derived fields are read fresh.
+  discover(selected, maxAgeMs = 2000) {
+    const key = JSON.stringify(selected.map(d => [d.path, d.recursive === true])), cached = this.discovery;
+    if (cached?.key === key && (cached.pending || Date.now() - cached.at < Math.max(2000, maxAgeMs))) return cached.promise;
+    const entry = { key, at: Date.now(), pending: true };
+    entry.promise = Promise.allSettled(selected.map(d => this.sessions({ directory: d.path, recursive: d.recursive })))
+      .finally(() => { entry.pending = false; entry.at = Date.now(); });
+    this.discovery = entry; return entry.promise;
+  }
+  async sessions({ directory, directories, recursive = false, maxAgeMs }) {
     const access = this.accessPolicy || await readAccessPolicy();
     if (Array.isArray(directories)) {
       directories = directories.filter(d => access.permits(d.path, d.recursive));
-      const results = await Promise.allSettled(directories.filter(d => d.enabled !== false).map(d => this.sessions({ directory: d.path, recursive: d.recursive })));
+      const results = await this.discover(directories.filter(d => d.enabled !== false), maxAgeMs);
       const merged = new Map(), warnings = [], directoryResults = [];
       const selected = directories.filter(d => d.enabled !== false);
       for (const [i, result] of results.entries()) {
@@ -115,6 +139,31 @@ export class CooperationService {
     if (!cycle) return null;
     return { ...Object.fromEntries(['id', 'state', 'previousState', 'trigger', 'wasWorkingAtTrigger', 'createdAt', 'updatedAt', 'reason', 'handoffPath', 'lastAttemptOutcome', 'completedAt', 'lastReceiptIssue', 'lateReceiptAccepted'].map(key => [key, cycle[key]])),
       canRestartFromCurrent: canRestartFromCurrent(cycle), compactionFailed: confirmedCompactionFailure(cycle), maintenanceQuota: cycle.maintenanceQuota };
+  }
+  // A program holding a session's interface key posts into that session's
+  // ordinary FIFO mailbox. It is never a user prompt or a maintenance control.
+  async notify(key, { text, source } = {}) {
+    const hook = this.store.verifySessionHook?.(key);
+    if (!hook) throw Object.assign(new Error('会话接口密钥无效。'), { statusCode: 401 });
+    if (!hook.enabled) throw Object.assign(new Error('该会话接口已被用户停用。'), { statusCode: 403 });
+    if (typeof text !== 'string' || !text.trim()) throw new Error('消息内容不能为空。');
+    if (Buffer.byteLength(text, 'utf8') > 256 * 1024) throw new Error('单条消息最多 256 KiB，请缩短内容。');
+    if (source !== undefined && typeof source !== 'string') throw new Error('来源名称必须是文字。');
+    const recent = (this.hookCalls.get(hook.id) || []).filter(at => Date.now() - at < 60000);
+    if (recent.length >= 30) throw Object.assign(new Error('该会话接口一分钟内调用过多，请稍后再试。'), { statusCode: 429 });
+    recent.push(Date.now()); this.hookCalls.set(hook.id, recent);
+    if (!this.mailbox || !this.adapters[hook.session.client]) throw new Error('该客户端尚未在当前管理服务接入。');
+    const targetSession = await this.adapters[hook.session.client].find(hook.session.id);
+    if (!targetSession) throw new Error('找不到该接口对应的会话。');
+    const access = this.accessPolicy || await readAccessPolicy(); access.assert(targetSession.cwd);
+    const prompts = await readPromptSettings(this.root), { prefix, suffix } = prompts.values.messages[targetSession.client];
+    const to = publicSession(targetSession);
+    this.store.touchSessionHook(hook);
+    const saved = await this.mailbox.send({ id: randomUUID(), createdAt: new Date().toISOString(), status: 'pending',
+      from: externalSender(hook, to, source), to, text, messageAffixes: { prefix, suffix }, promptRevision: prompts.revision,
+      source: { kind: 'session-hook', hookId: hook.id } });
+    return { messageId: saved.id, status: saved.status, to: saved.to.address,
+      ...(saved.cycleId ? { cycleId: saved.cycleId } : {}), ...(saved.error ? { error: saved.error } : {}), ...(saved.detail ? { detail: saved.detail } : {}) };
   }
   async send({ from, to, message }, source) {
     if (typeof message !== 'string' || !message.trim()) throw new Error('消息内容不能为空。');

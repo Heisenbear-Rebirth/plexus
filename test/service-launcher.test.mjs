@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { ManagementStore } from '../src/management-store.mjs';
 const exec = promisify(execFile);
 function isolatedEnvironment(extra = {}) {
-  const env = { ...process.env, ...extra };
+  const env = { ...process.env, COOP_PORT: '0', ...extra };
   for (const name of ['CODEX_APP_TOOLS_PIPE_PATH', 'CODEX_THREAD_ID', 'CODEX_MCP_NODE_PATH']) delete env[name];
   return env;
 }

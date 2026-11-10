@@ -1,10 +1,10 @@
-import { readFile, readdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
 import { sendClaudeMessage } from '../adapters/claude.mjs';
+import { instanceRecords } from '../claude-instance-registry.mjs';
 import { readAccessPolicy } from '../access-policy.mjs';
 import { receivedNativeQuota } from '../quota-state.mjs';
+import { peerDeliveryEntries, peerDeliveryOutcome } from '../peer-delivery.mjs';
 
 // Controllers pass operation options; older callers pass the UUID directly.
 function controlRequestId(options) {
@@ -15,16 +15,15 @@ function controlRequestId(options) {
 }
 
 export class ClaudeRuntime {
-  constructor(sessionId, { folder = fileURLToPath(new URL('../../.cooperation/claude-wrapper/instances/', import.meta.url)) } = {}) {
+  constructor(sessionId, { folder = fileURLToPath(new URL('../../.cooperation/claude-wrapper/instances/', import.meta.url)), peerVerdictMs = 1500 } = {}) {
     if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error('Invalid Claude session ID.');
-    this.id = sessionId.toLowerCase(); this.folder = folder;
+    this.id = sessionId.toLowerCase(); this.folder = folder; this.peerVerdictMs = peerVerdictMs;
   }
   async connect() {
     const access = await readAccessPolicy();
     const candidates = [];
-    for (const filename of (await readdir(this.folder).catch(() => [])).filter(f => f.endsWith('.json'))) {
+    for (const record of await instanceRecords(this.folder)) {
       try {
-        const record = JSON.parse(await readFile(join(this.folder, filename), 'utf8'));
         if (record.sessionId !== this.id) continue;
         if (!access.permits(record.cwd)) continue;
         const url = new URL(record.endpoint);
@@ -110,8 +109,25 @@ export class ClaudeRuntime {
       throw error;
     }
     if (prepared && (result.status === 'failed' || result.notSubmitted === true)) await observe('cancel').catch(() => {});
+    // The socket has no delivery ACK, but Claude's receive policy decides at
+    // ingress. Report a native hold or drop instead of a bare submission.
+    const nativeDelivery = prepared && result.status === 'submitted' && observed.capabilities?.peerDeliveryLifecycle
+      ? await this.peerVerdict(requestId) : null;
+    const outcome = peerDeliveryOutcome(nativeDelivery);
     return { ...result, visibility, ...(!visibility.replayEnabled
-      ? { detail: '本次使用普通 peer 通道；接收端尚未启用可见消息，请在工作结束后重新打开已接入的 Claude 面板。' } : {}) };
+      ? { detail: '本次使用普通 peer 通道；接收端尚未启用可见消息，请在工作结束后重新打开已接入的 Claude 面板。' } : {}),
+      ...(nativeDelivery ? { nativeDelivery } : {}), ...(outcome?.detail ? { detail: outcome.detail } : {}) };
+  }
+  async peerVerdict(messageId) {
+    const id = messageId.toLowerCase(), deadline = Date.now() + this.peerVerdictMs;
+    while (true) {
+      try {
+        const entry = peerDeliveryEntries(await this.status()).find(e => e.messageId === id);
+        if (['held', 'dropped', 'received'].includes(entry?.state)) return entry;
+      } catch { return null; }
+      if (Date.now() >= deadline) return null;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
   sendPeer(args) { return sendClaudeMessage(args); }
   async sendControl(text, expected, options) { return this.sendMessage(text, { kind: 'maintenance', expected, requestId: controlRequestId(options) }); }

@@ -5,10 +5,10 @@ import { execFile } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { readAccessPolicy } from '../access-policy.mjs';
 import { claudePeerEnvelope } from '../peer-permissions.mjs';
+import { persistedMap } from '../persisted-cache.mjs';
 
 const execFileAsync = promisify(execFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -137,44 +137,93 @@ function topLevelMetadata(line) {
   return result;
 }
 
-async function transcriptMetadata(filename, expectedId, fallbackCwd) {
-  const fileInfo = await stat(filename);
-  const metadata = { id: expectedId, cwd: fallbackCwd ?? null, customTitle: null, aiTitle: null, transcriptPath: filename, updatedAt: iso(fileInfo.mtimeMs) };
-  let hasSessionCwd = false;
-  const input = createReadStream(filename, { encoding: 'utf8' });
-  const lines = createInterface({ input, crlfDelay: Infinity });
-  try {
-    for await (const line of lines) {
-      const fields = topLevelMetadata(line);
-      if (fields.sessionId && fields.sessionId.toLowerCase() !== expectedId.toLowerCase()) continue;
-      // Later cwd fields follow shell directory changes, not the session's project.
-      if (!hasSessionCwd && typeof fields.cwd === 'string' && fields.cwd) { metadata.cwd = fields.cwd; hasSessionCwd = true; }
-      if (fields.type === 'custom-title' && typeof fields.customTitle === 'string') metadata.customTitle = fields.customTitle.trim() || null;
-      if (fields.type === 'ai-title' && typeof fields.aiTitle === 'string') metadata.aiTitle = fields.aiTitle.trim() || null;
-    }
-  } finally {
-    lines.close();
-    input.destroy();
+// Transcripts are append-only JSONL and grow to hundreds of MB. Remember how far
+// each file was scanned and the metadata found so far, so discovery reads only
+// appended bytes. The manager persists this cache; other processes keep it in memory.
+const transcripts = persistedMap(), transcriptScans = new Map();
+export function persistTranscriptCache(filename) { transcripts.persistTo(filename); }
+function applyTranscriptLine(entry, expectedId, line) {
+  const fields = topLevelMetadata(line);
+  if (fields.sessionId && fields.sessionId.toLowerCase() !== expectedId.toLowerCase()) return;
+  // Later cwd fields follow shell directory changes, not the session's project.
+  if (entry.cwd === null && typeof fields.cwd === 'string' && fields.cwd) entry.cwd = fields.cwd;
+  if (fields.type === 'custom-title' && typeof fields.customTitle === 'string') entry.customTitle = fields.customTitle.trim() || null;
+  if (fields.type === 'ai-title' && typeof fields.aiTitle === 'string') entry.aiTitle = fields.aiTitle.trim() || null;
+}
+async function scanTranscript(filename, expectedId) {
+  await transcripts.load();
+  const info = await stat(filename);
+  let entry = transcripts.map.get(filename);
+  // A replaced or truncated file is rescanned from the start.
+  if (!entry || entry.id !== expectedId || entry.birthtimeMs !== info.birthtimeMs || info.size < entry.offset)
+    entry = { filename, id: expectedId, birthtimeMs: info.birthtimeMs, offset: 0, cwd: null, customTitle: null, aiTitle: null };
+  if (info.size > entry.offset) {
+    const next = { ...entry }, input = createReadStream(filename, { start: entry.offset, end: info.size - 1, highWaterMark: 1024 * 1024 });
+    let parts = [], partial = 0;
+    try {
+      for await (const chunk of input) {
+        let start = 0, end;
+        while ((end = chunk.indexOf(10, start)) >= 0) {
+          const piece = chunk.subarray(start, end);
+          // Title lines are small; large lines are messages and tool output, and
+          // only the first cwd is needed from those. Skip decoding them.
+          if (next.cwd === null || partial + piece.length <= 65536)
+            applyTranscriptLine(next, expectedId, (parts.length ? Buffer.concat([...parts, piece]) : piece).toString('utf8'));
+          parts = []; partial = 0; start = end + 1;
+        }
+        if (start < chunk.length) {
+          partial += chunk.length - start;
+          if (next.cwd === null || partial <= 65536) parts.push(chunk.subarray(start)); else parts = [];
+        }
+      }
+    } finally { input.destroy(); }
+    // An unterminated last line is still being written; read it next time.
+    next.offset = info.size - partial;
+    transcripts.map.set(filename, next); entry = next; transcripts.saveSoon();
   }
-  return metadata;
+  return { entry, info };
+}
+async function transcriptMetadata(filename, expectedId, fallbackCwd) {
+  let scan = transcriptScans.get(filename);
+  if (!scan) { scan = scanTranscript(filename, expectedId).finally(() => transcriptScans.delete(filename)); transcriptScans.set(filename, scan); }
+  const { entry, info } = await scan;
+  return { id: expectedId, cwd: entry.cwd ?? fallbackCwd ?? null, customTitle: entry.customTitle, aiTitle: entry.aiTitle,
+    transcriptPath: filename, updatedAt: iso(info.mtimeMs) };
 }
 
+// Verifying a PID's start time costs a PowerShell launch (about 0.35 s CPU).
+// A dead PID is caught by alive() on every read and sends re-verify with
+// validateProcessLifetime, so a verified (pid, start) pair is only re-checked
+// every 5 minutes against PID reuse after a crash.
+const LIFETIME_TTL_MS = 5 * 60_000, lifetimes = new Map();
+let verification = Promise.resolve();
 async function verifyRegistryLifetimes(records, warnings) {
   if (process.platform !== 'win32') return;
   const candidates = records.filter(record => record.live && (record.procStartFt || record.procStart));
   if (!candidates.length) return;
-  const pids = [...new Set(candidates.map(record => record.pid))];
-  // Numeric PIDs were validated by alive(). Query metadata only, in one batch;
-  // old registry files may refer to PIDs now owned by unrelated processes.
-  const script = '$taskProcesses = @(Get-Process -Id ' + pids.join(',')
-    + ' -ErrorAction SilentlyContinue | ForEach-Object { try { [pscustomobject]@{pid=$_.Id; start=$_.StartTime.ToFileTimeUtc().ToString()} } catch {} }); ConvertTo-Json -Compress -InputObject $taskProcesses';
-  let starts = new Map();
-  try {
-    const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 5000, maxBuffer: 256 * 1024 });
-    const values = JSON.parse(stdout.trim());
-    starts = new Map((Array.isArray(values) ? values : [values]).map(value => [value.pid, value.start]));
-  } catch { warnings.push('Could not verify Claude registry process lifetimes; unverified records are not treated as live.'); }
-  for (const record of candidates) record.live = starts.get(record.pid) === String(record.procStartFt || record.procStart);
+  const key = record => `${record.pid}:${record.procStartFt || record.procStart}`;
+  // Concurrent directory scans queue here, so they share one PowerShell batch.
+  const run = verification.then(async () => {
+    const now = Date.now();
+    for (const [name, value] of lifetimes) if (now - value.at >= LIFETIME_TTL_MS) lifetimes.delete(name);
+    const unknown = candidates.filter(record => !lifetimes.has(key(record)));
+    if (!unknown.length) return true;
+    const pids = [...new Set(unknown.map(record => record.pid))];
+    // Numeric PIDs were validated by alive(). Query metadata only, in one batch;
+    // old registry files may refer to PIDs now owned by unrelated processes.
+    const script = '$taskProcesses = @(Get-Process -Id ' + pids.join(',')
+      + ' -ErrorAction SilentlyContinue | ForEach-Object { try { [pscustomobject]@{pid=$_.Id; start=$_.StartTime.ToFileTimeUtc().ToString()} } catch {} }); ConvertTo-Json -Compress -InputObject $taskProcesses';
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 5000, maxBuffer: 256 * 1024 });
+      const values = stdout.trim() ? JSON.parse(stdout.trim()) : [];
+      const starts = new Map((Array.isArray(values) ? values : [values]).map(value => [value.pid, value.start]));
+      for (const record of unknown) lifetimes.set(key(record), { live: starts.get(record.pid) === String(record.procStartFt || record.procStart), at: now });
+      return true;
+    } catch { return false; }
+  });
+  verification = run.catch(() => {});
+  if (!await run) warnings.push('Could not verify Claude registry process lifetimes; unverified records are not treated as live.');
+  for (const record of candidates) record.live = lifetimes.get(key(record))?.live === true;
 }
 
 async function liveRecords(root, { id, directory, recursive = false } = {}, warnings = []) {

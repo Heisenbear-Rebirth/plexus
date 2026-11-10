@@ -30,6 +30,15 @@ test('peer projection preserves native object, provenance, UUID and replay ident
   const result = visiblePeerMessage(blocks, session);
   assert.equal(result.message.content[1], blocks.message.content[1]); assert.equal(result.isSynthetic, false);
 });
+test('a session-interface message is shown like any other Cooperation message', () => {
+  const id = randomUUID(), external = { client: 'external', id: '0123456789abcdef', name: '训练任务' };
+  const raw = { ...peer(id), message: { role: 'user', content: messageEnvelope(external, '训练完成', id) } };
+  const shown = visiblePeerMessage(raw, session);
+  assert.equal(shown.isSynthetic, false); assert.equal(shown.message.content, '【Cooperation 会话消息】\n' + raw.message.content);
+  for (const forged of [{ ...raw, uuid: randomUUID() },
+    { ...raw, message: { role: 'user', content: raw.message.content + '\n' + peer(id).message.content } }])
+    assert.equal(visiblePeerMessage(forged, session), forged, 'a mismatched ID or a second envelope stays native');
+});
 test('unrelated, untrusted, subagent and mismatched frames pass byte-for-byte', () => {
   const raw = peer();
   const values = [null, {}, { ...raw, type: 'assistant' }, { ...raw, isReplay: false }, { ...raw, origin: { kind: 'human' } },
@@ -143,7 +152,11 @@ for (const historyEnabled of [false, true]) test(`reopened wrapper history opt-i
     try {
       const state = await until(async () => {
         for (const name of await readdir(join(dir, 'instances')).catch(() => [])) if (name.endsWith('.json')) {
-          try { const s = JSON.parse(await readFile(join(dir, 'instances', name), 'utf8')); if (s.initialized && s.visibilityHistory?.status === (historyEnabled ? 'completed' : 'disabled')) return s; } catch {}
+          try {
+            const r = JSON.parse(await readFile(join(dir, 'instances', name), 'utf8')); if (!r.initialized) continue;
+            const s = await (await fetch(r.endpoint + '/status', { headers: { Authorization: `Bearer ${r.token}` } })).json();
+            if (s.visibilityHistory?.status === (historyEnabled ? 'completed' : 'disabled')) return s;
+          } catch {}
         }
       });
       assert.equal(state.activity, 'idle'); assert.equal(state.activeTurnId, null); assert.equal(state.queuedNativeInputs, 0);
@@ -164,7 +177,10 @@ for (const historyEnabled of [false, true]) test(`reopened wrapper history opt-i
       child.stdin.end(); await Promise.race([exited, sleep(3000)]); if (child.exitCode === null) child.kill(); await exited;
     }
   }
-  const inputs = (await readFile(join(dir, 'input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  const all = (await readFile(join(dir, 'input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  // Reading /status lets the wrapper query native settings; those reads are its own, never IDE input.
+  const own = all.filter(x => String(x.request_id || '').startsWith('cooperation-')), inputs = all.filter(x => !own.includes(x));
+  assert.ok(own.every(x => x.type === 'control_request' && ['get_settings', 'get_context_usage'].includes(x.request.subtype)));
   assert.deepEqual(inputs.map(x => x.type), ['control_request', 'control_request', 'control_request']);
   assert.ok(inputs.every(x => x.request.subtype === 'initialize'));
 });

@@ -5,7 +5,12 @@ import { execFileSync } from 'node:child_process';
 export function managerProcessAlive(record) {
   if (!Number.isSafeInteger(record.pid) || record.pid <= 0) return true;
   try { process.kill(record.pid, 0); }
-  catch (error) { if (error.code === 'ESRCH') return false; return true; }
+  catch (error) {
+    if (error.code === 'ESRCH') return false;
+    // A recycled PID may now belong to a protected Windows process. Access
+    // denial does not establish its identity; CIM can still read its birth time.
+    if (process.platform !== 'win32' || !['EPERM', 'EACCES'].includes(error.code)) return true;
+  }
   const acquiredAt = Date.parse(record.started_at);
   if (process.platform !== 'win32' || !Number.isFinite(acquiredAt)) return true;
   try {

@@ -6,8 +6,8 @@ import { sessionKey } from './management-store.mjs';
 import { readAccessPolicy } from './access-policy.mjs';
 
 export class ContextMonitor {
-  constructor({ store, service, runtimeFactory, onUpdate = () => {} }) {
-    this.store = store; this.service = service; this.onUpdate = onUpdate; this.clients = new Map(); this.readers = new Map();
+  constructor({ store, service, runtimeFactory, onUpdate = () => {}, onSessions = () => {} }) {
+    this.store = store; this.service = service; this.onUpdate = onUpdate; this.onSessions = onSessions; this.clients = new Map(); this.readers = new Map();
     this.injectedRuntime = Boolean(runtimeFactory);
     this.runtimeFactory = runtimeFactory || service.runtimeFactory || (session => createRuntime(session, { opencode: service.adapters?.opencode }));
     this.inFlight = new Map(); this.discovered = []; this.discoveryAt = 0; this.discoverySignature = ''; this.closed = false;
@@ -20,6 +20,9 @@ export class ContextMonitor {
     if (signature !== this.discoverySignature || Date.now() - this.discoveryAt >= 15000) {
       const result = await this.service.sessions({ directories });
       this.discovered = result.sessions;
+      const listed = JSON.stringify(result.sessions.map(s => [s.address, s.name, s.cwd, s.status, s.live]));
+      if (this.listed !== undefined && listed !== this.listed) this.onSessions();
+      this.listed = listed;
       this.discoverySignature = signature; this.discoveryAt = Date.now();
       const retained = new Set([...this.discovered, ...this.store.policies().filter(p => p.enabled).map(p => p.session),
         ...this.store.activeCycles().map(c => c.session)].map(sessionKey));
@@ -74,6 +77,10 @@ export class ContextMonitor {
         try { usage = await this.readers.get(key).read(); } catch (e) { error = e.message; }
       }
     } catch (e) { error = e.message; runtime = { connected: false, activity: 'offline', observedAt: new Date().toISOString(), capabilities: {} }; this.clients.delete(key); adapter.close(); }
+    if (session.client === 'claude' && runtime.connected) {
+      try { for (const id of this.store.observePeerDeliveries?.(session, runtime) || []) this.service.onMessage?.(id); }
+      catch { /* Ledger sync retries on the next sample; observation must not stop. */ }
+    }
     if (!usage && ['codex', 'claude'].includes(session.client)) {
       try {
         if (!this.readers.has(key)) this.readers.set(key, new IncrementalContextReader(session.client, session.id));
@@ -85,7 +92,9 @@ export class ContextMonitor {
     const decision = evaluatePolicy({ policy, runtime, usage, cycle, lastCycle });
     const sample = { session: { ...publicSession(session), hostId: session.hostId || 'local' }, runtime, usage: usage || null, decision,
       quotaRecovery: this.store.getSetting('quota-recovery:' + key), error: error || null, observedAt: new Date().toISOString() };
-    this.store.saveSnapshot(session, sample); this.onUpdate(session); return sample;
+    // Pages are told about real changes only.
+    if (this.store.saveSnapshot(session, sample) !== false) this.onUpdate(session);
+    return sample;
   }
   close() { this.closed = true; for (const adapter of this.clients.values()) adapter.close(); this.clients.clear(); }
 }

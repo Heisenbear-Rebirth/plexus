@@ -45,6 +45,24 @@ test('capture needs a real environment connection and never invents a caller ide
   assert.equal(saved.callerThreadId, first.callerThreadId); assert.equal(saved.pipePath, context('second').pipePath);
   assert.equal(await rememberCodexBridge(root, { ...first, pipePath: 'https://example.invalid' }), false);
 });
+
+test('a relay selects another captured caller instead of calling from its own target, including after restart', async t => {
+  const root = await fixture(t), first = context('app'), target = { ...first, callerThreadId: randomUUID() };
+  await rememberCodexBridge(root, first); await rememberCodexBridge(root, target);
+  const bridge = await new CodexBridgeConnection({ root, probe: async () => {}, intervalMs: 60000 }).init();
+  try {
+    assert.deepEqual(await bridge.getContext(), target);
+    assert.deepEqual(await bridge.getContext({ excludeThreadId: target.callerThreadId }), first);
+  } finally { await bridge.close(); }
+});
+
+test('a relay with only the recipient as a captured caller defers before any send', async t => {
+  const root = await fixture(t), target = context('only');
+  await rememberCodexBridge(root, target);
+  const bridge = await new CodexBridgeConnection({ root, probe: async () => {}, intervalMs: 60000 }).init();
+  try { await assert.rejects(bridge.getContext({ excludeThreadId: target.callerThreadId }), { code: 'CODEX_RELAY_CALLER_UNAVAILABLE', outcome: 'not_submitted' }); }
+  finally { await bridge.close(); }
+});
 test('invalid persisted connection data cannot start an executable', async t => {
   const root = await fixture(t); await mkdir(join(root, '.cooperation'));
   await writeFile(join(root, '.cooperation/codex-bridge.json'), JSON.stringify({ version: 1, context: { ...context('first'), nodePath: 'relative-script' } }));

@@ -133,12 +133,20 @@ async function readSessions({ codexHome, id } = {}) {
   return { sessions: [], warnings };
 }
 
+// Directory scans run in parallel; concurrent ones share one database read.
+const sessionReads = new Map();
+function sharedSessions(codexHome) {
+  const key = homeDirectory(codexHome);
+  if (!sessionReads.has(key)) sessionReads.set(key, readSessions({ codexHome }).finally(() => sessionReads.delete(key)));
+  return sessionReads.get(key);
+}
+
 export async function listCodexSessions({ directory, recursive = false, codexHome } = {}) {
   if (directory != null) (await readAccessPolicy()).assert(directory, recursive);
   if (directory != null && (typeof directory !== 'string' || !directory.trim())) {
     throw adapterError('CODEX_INVALID_DIRECTORY', 'A non-empty directory is required.');
   }
-  const result = await readSessions({ codexHome });
+  const result = await sharedSessions(codexHome);
   return {
     ...result,
     sessions: result.sessions.filter((session) => matchesDirectory(session.cwd, directory, recursive))
@@ -319,7 +327,7 @@ export async function sendCodexMessage({ targetId, text, context = {} } = {}) {
     bridgePath,
     pipePath,
     handshakeTimeoutMs: context.handshakeTimeoutMs ?? 10000,
-    requestTimeoutMs: context.requestTimeoutMs ?? 45000,
+    requestTimeoutMs: context.requestTimeoutMs ?? 120000,
   });
   let sendAttempted = false;
   try {

@@ -24,7 +24,9 @@
 
 完整格式见 [示例](examples/claude-wrapper.vscode-settings.json)。不要用片段覆盖整个设置文件。Windows 普通 VS Code 的用户设置通常位于 `%APPDATA%/Code/User/settings.json`；其他发行版和配置文件位置可能不同。
 
-在管理页为所需的精确目录勾选“Claude 控制”。白名单保存在本项目 `.cooperation/claude-wrapper/config.json`。已有面板需要重开才能经 wrapper 启动；未允许目录继续原样转发，不提供控制端点。递归展示目录不会自动扩大控制范围。
+在管理页为项目勾选“Claude 控制”。同时勾选“包含子目录”后，接入覆盖项目及其子目录；取消勾选会撤回继承，单独设置过的子项目按更具体的设置处理。配置保存在本项目 `.cooperation/claude-wrapper/config.json`，启动管理服务时会同步已有项目的目录范围。未接入的已有进程需要正常重开一次以加载 wrapper；未允许目录继续原样转发，不提供控制端点。正在维护的会话所需范围不能直接撤回。
+
+`directoryScopes` 保存启用与递归范围；`directories` 由同一规则生成，兼容已经打开的旧接入进程。范围变更会同时更新两者，避免旧进程保留已撤回的控制权限。
 
 官方 wrapper 模式可能影响插件初始权限模式的回退选择，启用后应在原面板确认权限符合预期。工具不替用户选择模型、思考强度或权限模式。
 
@@ -57,6 +59,7 @@ Claude 可能要求用户批准该命令。可采用项目范围的窄 allow 规
 - 原生 interrupt 确认后仍等原 result 结束；压缩需观察 compact_boundary 与后续 result。
 - 忙碌用量来自主会话 API usage，包含缓存和已报告输出。容量或 effort 无法确认时保持未知。
 - 注册文件、日志和临时数据位于本项目。注册文件含本机凭据，不应分享。
+- 注册文件只用于定位 wrapper（会话、实例、端点、凭据和进程号），实时状态从 `/status` 读取，因此工作中不会反复改写注册文件。面板被强制关闭后遗留的注册文件，由管理服务在对应进程退出后删除。
 - Windows launcher 的 Job Object 在退出时清理代理及其子进程；此生命周期行为应纳入使用评估。
 
 ## 回滚

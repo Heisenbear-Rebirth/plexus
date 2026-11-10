@@ -82,6 +82,7 @@ export class RestartConfirmation {
     return !this.blocks(key) && this.seen.has(key) && this.store.getSnapshot(r.session)?.runtime?.connected === true;
   }
   assertAllowed(session) { if (this.blocks(session)) throw Error('项目已重启，请先在“待确认接续”中确认此会话。'); }
+  statuses() { return new Map(this.store.db.prepare('SELECT key, data FROM settings WHERE key LIKE ?').all(prefix + '%').map(row => [row.key.slice(prefix.length), JSON.parse(row.data)?.status || null])); }
   list() {
     return this.store.db.prepare('SELECT data FROM settings WHERE key LIKE ?').all(prefix + '%').map(row => JSON.parse(row.data))
       .filter(r => r.bootId === this.bootId && ['pending', 'deferred'].includes(r.status))

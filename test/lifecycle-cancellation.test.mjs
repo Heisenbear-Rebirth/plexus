@@ -25,5 +25,5 @@ test('Cancelled MCP retains message/checkpoint tools and rejects stale lifecycle
   child.stdin.end(JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})+'\n'+JSON.stringify({jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'create_session',arguments:{requestId:'stale-create',directory:root,client:'codex',prompt:'Must not run'}}})+'\n');
   await new Promise((done,fail)=>{child.once('close',done);child.once('error',fail);});
   const rows=output.trim().split('\n').map(JSON.parse),catalog=rows.find(r=>r.id===1).result,error=rows.find(r=>r.id===2).result;
-  assert.deepEqual(catalog.tools.map(t=>t.name),['send_message','context_checkpoint']);assert.equal(error.isError,true);assert.match(error.content[0].text,/已取消/);
+  assert.deepEqual(catalog.tools.map(t=>t.name),['send_message','context_checkpoint','session_interface']);assert.equal(error.isError,true);assert.match(error.content[0].text,/已取消/);
 });

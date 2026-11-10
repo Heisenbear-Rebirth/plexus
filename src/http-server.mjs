@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ManagementStore } from './management-store.mjs';
+import { ManagementStore, sessionKey } from './management-store.mjs';
 import { CooperationService } from './service.mjs';
 import { validateDirectory } from './directory-service.mjs';
 import { parseAddress, publicSession } from './address.mjs';
@@ -17,11 +17,16 @@ import { ProjectGroups } from './project-groups.mjs';
 import { PromptSettings } from './prompt-settings.mjs';
 import { defaultPromptValues } from '../public/prompt-templates.mjs';
 import { promptPreviewSamples } from './maintenance-prompts.mjs';
-import { listenLoopback } from './loopback-server.mjs';
+import { listenLoopback, DEFAULT_PORT } from './loopback-server.mjs';
+import { publicSessionHook } from './session-hooks.mjs';
+import { persistTranscriptCache } from './adapters/claude.mjs';
+import { persistArchiveUsage } from './context-usage.mjs';
 
-export async function startServer({ root, port = 47821, host = '127.0.0.1', defaultDirectory = root, codexContext, adapters, bridgeProbe, runtimeFactory, lifecycleDirectories, startMonitoring = true, onShutdown = () => {} } = {}) {
+export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1', defaultDirectory = root, codexContext, adapters, bridgeProbe, runtimeFactory, lifecycleDirectories, startMonitoring = true, portFallback = false, onShutdown = () => {} } = {}) {
   if (host !== '127.0.0.1') throw new Error('管理台仅允许监听 127.0.0.1。');
   const dataDirectory = join(root, '.cooperation');
+  // Discovery then reads only appended transcript bytes, even after a restart.
+  persistTranscriptCache(join(dataDirectory, 'cache', 'claude-transcripts.json')); persistArchiveUsage(join(dataDirectory, 'cache', 'codex-archives.json'));
   await mkdir(dataDirectory, { recursive: true });
   let previous;
   try { previous = JSON.parse(await readFile(join(dataDirectory, 'connection.json'), 'utf8')); } catch {}
@@ -34,9 +39,16 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
     }
   }
   const store = await new ManagementStore(dataDirectory).init();
+  const wrapperSettings = new WrapperDirectorySettings(root);
+  const knownWrapperPaths = () => store.snapshotList().map(snapshot => snapshot.session?.cwd).filter(Boolean);
+  const keepActiveClaudeControl = (next, previous) => {
+    if (store.activeCycles().some(c => c.session.client === 'claude' && wrapperEnabledFor(previous, c.session.cwd)
+      && !wrapperEnabledFor(next, c.session.cwd))) throw new Error('该目录或子目录正在维护，请先结束维护再缩小接入范围。');
+  };
   try {
     store.acquireManager(); await store.migrateLegacy();
     if (!store.directories().length) store.saveDirectory(await validateDirectory(defaultDirectory));
+    await wrapperSettings.synchronize(store.directories(), knownWrapperPaths(), keepActiveClaudeControl);
   } catch (error) { store.close(); throw error; }
   const token = randomBytes(32).toString('hex');
   const csrfToken = randomBytes(24).toString('hex');
@@ -47,10 +59,10 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
   const service = new CooperationService({ store, root, codexContext, codexBridge, adapters, lifecycleDirectories, runtimeFactory, onMessage: (id) => {
     for (const response of streams) response.write(`event: message\ndata: ${JSON.stringify({ id })}\n\n`);
   } });
-  const monitor = new ContextMonitor({ store, service, runtimeFactory, onUpdate: session => publish('management', { client: session.client, id: session.id }) });
+  const monitor = new ContextMonitor({ store, service, runtimeFactory, onUpdate: session => publish('management', { client: session.client, id: session.id }),
+    onSessions: () => publish('sessions', {}) });
   const controller = new MaintenanceController({ root, store, service, monitor, onUpdate: session => publish('management', { client: session.client, id: session.id }) });
   const checkpoints = new CheckpointService({ root, store, readRuntime: session => monitor.runtime(session).status(), onReceipt: cycleId => publish('management', { cycleId }) });
-  const wrapperSettings = new WrapperDirectorySettings(root);
   const groups = new ProjectGroups(store);
   const prompts = new PromptSettings(root);
   const directoryRecords = async () => { const config = await readWrapperDirectories(root); return store.directories().map(d => ({ ...d, claudeControlEnabled: wrapperEnabledFor(config, d.path) })); };
@@ -90,6 +102,7 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
       if (request.method === 'GET' && url.pathname === '/api/config') {
         return json(response, 200, { version: '0.2.0', bootId: store.restartConfirmation.bootId, installationDirectory: root, defaultDirectory, directories: await directoryRecords(), policyDefaults: POLICY_DEFAULTS, csrfToken,
           lifecycle: service.lifecycle.capabilities(), lifecycleDirectories: service.lifecycle.directories,
+          claudePeerCrossModeAccept: (await readWrapperDirectories(root)).peerCrossModeAccept === true,
           bridge: { codex: bridgeStatus().connected, codexStatus: bridgeStatus() }, warnings: store.warnings });
       }
       if (request.method === 'GET' && url.pathname === '/api/bridge') {
@@ -109,8 +122,8 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
       }
       if (request.method === 'POST' && url.pathname === '/api/sessions') {
         if (!equal(request.headers['x-coop-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面查询会话。' });
-        const query = await body(request);
-        const result = await service.sessions(query.directoryIds ? { directories: scope(query.directoryIds) } : query);
+        const query = await body(request), maxAgeMs = Math.min(15000, Math.max(0, Number(query.maxAgeMs) || 0));
+        const result = await service.sessions(query.directoryIds ? { directories: scope(query.directoryIds), maxAgeMs } : query);
         const wrapper = await readWrapperDirectories(root);
         for (const session of result.sessions) if (session.client === 'claude') session.controlAccess = {
           directoryEnabled: wrapperEnabledFor(wrapper, session.cwd), detail: wrapperEnabledFor(wrapper, session.cwd) ? '读取状态以确认接入；旧会话可能需要重开。' : '当前会话目录尚未允许 Claude 控制接入。' };
@@ -131,13 +144,16 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
         return json(response, 200, { group, groups: groups.list() });
       }
       if (request.method === 'GET' && url.pathname === '/api/monitoring') {
-        return json(response, 200, { bootId: store.restartConfirmation.bootId, restartConfirmations: store.restartConfirmation.list(), sessions: store.db.prepare('SELECT data FROM snapshots').all().map(row => {
-          const snapshot = JSON.parse(row.data); return { ...snapshot, policy: store.getPolicy(snapshot.session),
-            restartConsent: store.restartConfirmation.get(snapshot.session)?.status || null,
-            cycle: service.publicCycle(store.activeCycle(snapshot.session)), lastCycle: service.publicCycle(store.lastCycle(snapshot.session)), queueCount: store.queueCount(snapshot.session), queueState: store.queueState(snapshot.session) };
+        const policies = new Map(store.policies().map(p => [sessionKey(p.session), p])), active = new Map(store.activeCycles().map(c => [sessionKey(c.session), c]));
+        const last = store.lastCycles(), queues = store.queueStates(), consents = store.restartConfirmation.statuses();
+        return json(response, 200, { bootId: store.restartConfirmation.bootId, restartConfirmations: store.restartConfirmation.list(), sessions: store.snapshotList().map(snapshot => {
+          const key = sessionKey(snapshot.session), queueState = queues.get(key) || {};
+          return { ...snapshot, policy: policies.get(key) || null, restartConsent: consents.get(key) || null,
+            cycle: service.publicCycle(active.get(key)), lastCycle: service.publicCycle(last.get(key)),
+            queueCount: Object.values(queueState).reduce((sum, n) => sum + n, 0), queueState };
         }) });
       }
-      if (request.method === 'POST' && ['/api/restart-confirmation', '/api/directories', '/api/directories/remove', '/api/directories/claude-control', '/api/policies', '/api/runtime', '/api/cycles/action', '/api/messages/resolve', '/api/queue/release'].includes(url.pathname)) {
+      if (request.method === 'POST' && ['/api/restart-confirmation', '/api/directories', '/api/directories/remove', '/api/directories/claude-control', '/api/claude-peer-inbound', '/api/session-hook', '/api/policies', '/api/runtime', '/api/cycles/action', '/api/messages/resolve', '/api/queue/release'].includes(url.pathname)) {
         if (!equal(request.headers['x-coop-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面操作。' });
         const input = await body(request);
         if (url.pathname === '/api/restart-confirmation') {
@@ -146,17 +162,42 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
           return json(response, 200, { bootId: store.restartConfirmation.bootId, restartConfirmations });
         }
         if (url.pathname === '/api/directories') {
-          const directory = store.saveDirectory({ ...await validateDirectory(input.path), label: typeof input.label === 'string' ? input.label.slice(0, 200) : '', recursive: input.recursive === true });
+          const value = { ...await validateDirectory(input.path), label: typeof input.label === 'string' ? input.label.slice(0, 200) : '', recursive: input.recursive === true };
+          const records = store.directories().filter(d => d.normalized !== value.normalized);
+          await wrapperSettings.synchronize([...records, value], knownWrapperPaths(), keepActiveClaudeControl);
+          const directory = store.saveDirectory(value);
           return json(response, 200, { directory, directories: await directoryRecords() });
         }
-        if (url.pathname === '/api/directories/remove') { store.removeDirectory(input.id); return json(response, 200, { directories: await directoryRecords() }); }
+        if (url.pathname === '/api/directories/remove') {
+          const directory = store.directories().find(d => d.id === input.id);
+          if (directory) {
+            if (store.activeCycles().some(c => containsDirectory(c.session.cwd, directory.path, directory.recursive))) throw new Error('该目录有正在维护的会话，请先完成或取消维护。');
+            await wrapperSettings.remove(directory.path, knownWrapperPaths(), keepActiveClaudeControl);
+            store.removeDirectory(input.id);
+          }
+          return json(response, 200, { directories: await directoryRecords() });
+        }
         if (url.pathname === '/api/directories/claude-control') {
           const directory = store.directories().find(d => d.id === input.id);
           if (!directory || typeof input.enabled !== 'boolean') throw new Error('请指定已添加的目录及启用状态。');
-          if (!input.enabled && store.activeCycles().some(c => c.session.client === 'claude' && containsDirectory(c.session.cwd, directory.path))) throw new Error('该目录正在维护，请先结束维护再关闭接入。');
-          await wrapperSettings.set(directory.path, input.enabled);
+          await wrapperSettings.set(directory.path, input.enabled, { recursive: directory.recursive, knownPaths: knownWrapperPaths(), validate: keepActiveClaudeControl });
           store.event('wrapper_directory_control', { directoryId: input.id, enabled: input.enabled });
           return json(response, 200, { directories: await directoryRecords(), detail: '配置已保存；已打开的 Claude 会话需要重新打开，且沿用已配置的官方启动器。' });
+        }
+        if (url.pathname === '/api/claude-peer-inbound') {
+          if (typeof input.enabled !== 'boolean') throw new Error('请指定是否允许不同权限模式互发。');
+          const config = await wrapperSettings.setPeerCrossModeAccept(input.enabled);
+          store.event('claude_peer_inbound', { accept: input.enabled }); publish('management', { peerInbound: true });
+          return json(response, 200, { claudePeerCrossModeAccept: config.peerCrossModeAccept === true });
+        }
+        if (url.pathname === '/api/session-hook') {
+          if (!['get', 'create', 'rotate', 'enable', 'disable'].includes(input.action)) throw new Error('不支持的会话接口操作。');
+          const session = await resolveSession(input.address), existing = store.sessionHook(session);
+          if (input.action === 'get' || !existing && ['rotate', 'disable'].includes(input.action))
+            return json(response, 200, { hook: publicSessionHook(existing, { root, url: 'http://' + expectedHost }) });
+          const hook = store.saveSessionHook(session, { createdBy: 'ui', rotate: input.action === 'rotate',
+            ...(['create', 'enable'].includes(input.action) ? { enabled: true } : input.action === 'disable' ? { enabled: false } : {}) });
+          return json(response, 200, { hook: publicSessionHook(hook, { root, url: 'http://' + expectedHost }) });
         }
         if (url.pathname === '/api/policies') {
           const session = await resolveSession(input.address);
@@ -203,9 +244,12 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
           if (!Array.isArray(input) || input.length > 2000 || input.some(a => typeof a !== 'string')) throw new Error('会话筛选格式不正确。');
           addresses = new Set(input.map(a => { const s = parseAddress(a); return s.client + ':' + (s.client === 'opencode' ? s.id : s.id.toLowerCase()); }));
         }
+        // The page repeats an unchanged query; answer it without reading every message again.
+        const revision = `${store.restartConfirmation.bootId}:${store.messageRevision}`;
+        if (url.searchParams.get('revision') === revision) return json(response, 200, { unchanged: true, revision });
         const messages = (query.directories?.length === 0 ? [] : store.list(query)).filter(message => addresses === null ||
           [message.from, message.to].some(s => addresses.has(s.client + ':' + (s.client === 'opencode' ? s.id : s.id.toLowerCase()))));
-        return json(response, 200, { messages, total: messages.length });
+        return json(response, 200, { messages, total: messages.length, revision });
       }
       if (request.method === 'GET' && url.pathname === '/api/events') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive' });
@@ -213,6 +257,22 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
         const heartbeat = setInterval(() => response.write(': keepalive\n\n'), 25000);
         request.on('close', () => { clearInterval(heartbeat); streams.delete(response); });
         return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/hooks/notify') {
+        const key = /^Bearer (.+)$/.exec(request.headers.authorization || '')?.[1];
+        const input = await body(request);
+        if (Object.keys(input).some(k => !['text', 'source'].includes(k))) throw new Error('只接受 text 和 source 字段。');
+        return json(response, 200, await service.notify(key, input));
+      }
+      if (request.method === 'POST' && url.pathname === '/api/session-hook/self') {
+        if (!equal(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: '需要本机通信客户端凭据。' });
+        const input = await body(request);
+        const from = parseAddress(`${input.from?.client}:${input.from?.id}`);
+        if (from.client === 'opencode') throw new Error('OpenCode 会话请在管理页开启会话接口。');
+        const session = await resolveSession(`${from.client}:${from.id}`), existing = store.sessionHook(session);
+        if (existing && !existing.enabled) return json(response, 403, { error: '该会话接口已被用户停用；请在管理页重新启用。' });
+        const hook = existing || store.saveSessionHook(session, { createdBy: 'agent' });
+        return json(response, 200, publicSessionHook(hook, { root, url: 'http://' + expectedHost }));
       }
       if (request.method === 'POST' && url.pathname === '/api/send') {
         if (!equal(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: '需要本机通信客户端凭据。' });
@@ -261,7 +321,7 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
           kind: 'opencode-tool-context', instanceId: input.instanceId, nativeMessageId: input.nativeMessageId, nativeUserMessageId: input.nativeUserMessageId,
         }));
       }
-      const assets = { '/restart-confirmation.mjs': ['restart-confirmation.mjs', 'text/javascript'], '/': ['index.html', 'text/html'], '/index.html': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/ui-state.mjs': ['ui-state.mjs', 'text/javascript'], '/connection-guidance.mjs': ['connection-guidance.mjs', 'text/javascript'], '/maintenance-view.mjs': ['maintenance-view.mjs', 'text/javascript'], '/prompt-editor.mjs': ['prompt-editor.mjs', 'text/javascript'], '/prompt-templates.mjs': ['prompt-templates.mjs', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'] };
+      const assets = { '/restart-confirmation.mjs': ['restart-confirmation.mjs', 'text/javascript'], '/': ['index.html', 'text/html'], '/index.html': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/ui-state.mjs': ['ui-state.mjs', 'text/javascript'], '/connection-guidance.mjs': ['connection-guidance.mjs', 'text/javascript'], '/maintenance-view.mjs': ['maintenance-view.mjs', 'text/javascript'], '/prompt-editor.mjs': ['prompt-editor.mjs', 'text/javascript'], '/peer-settings.mjs': ['peer-settings.mjs', 'text/javascript'], '/session-hook.mjs': ['session-hook.mjs', 'text/javascript'], '/prompt-templates.mjs': ['prompt-templates.mjs', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'] };
       if (request.method === 'GET' && assets[url.pathname]) {
         const [filename, type] = assets[url.pathname];
         response.writeHead(200, { 'Content-Type': `${type}; charset=utf-8` });
@@ -272,7 +332,15 @@ export async function startServer({ root, port = 47821, host = '127.0.0.1', defa
   });
   try {
     if (port === 0) await listenLoopback(server);
-    else await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
+    else {
+      try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); }
+      catch (error) {
+        // Only the default fixed port falls back; an explicit port must fail loudly.
+        if (!portFallback || !['EADDRINUSE', 'EACCES'].includes(error.code)) throw error;
+        await listenLoopback(server);
+        store.warnings.push(`固定端口 ${port} 已被其他程序占用，本次改用端口 ${server.address().port}。外部程序请用命令行 notify，或读取 .cooperation/connection.json 中的地址。`);
+      }
+    }
   }
   catch (error) { await controller.close(); await service.mailbox.close(); await service.codexQuota?.close(); await codexBridge?.close(); store.close(); throw error; }
   actualPort = server.address().port;

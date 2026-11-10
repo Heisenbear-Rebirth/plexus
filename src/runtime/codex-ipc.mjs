@@ -5,12 +5,16 @@ import { EventEmitter } from 'node:events';
 const versions = { initialize: 0, 'thread-owner-discovery': 1, 'thread-follower-start-turn': 2,
   'thread-follower-compact-thread': 1, 'thread-follower-interrupt-turn': 4 };
 const fail = (code, outcome = 'not_submitted') => Object.assign(new Error(code), { code, outcome, retryable: false });
+// Desktop snapshots contain conversation history, including long research runs.
+// Keep a finite limit while accepting these legitimate, larger native frames.
+const MAX_FRAME_BYTES = 128 * 1024 * 1024;
 
 // Normal independent desktop peer. Never claims ownership or another client's ID.
 export class CodexIpc extends EventEmitter {
   constructor({ endpoint = '\\\\.\\pipe\\codex-ipc', timeoutMs = 5000 } = {}) {
     super(); this.endpoint = endpoint; this.timeoutMs = timeoutMs; this.clientId = 'initializing-client';
-    this.buffer = Buffer.alloc(0); this.pending = new Map(); this.connected = false;
+    this.header = Buffer.alloc(4); this.headerBytes = 0; this.frame = null; this.frameBytes = 0;
+    this.pending = new Map(); this.connected = false;
   }
   async connect() {
     if (this.connected) return this;
@@ -52,15 +56,24 @@ export class CodexIpc extends EventEmitter {
       targetClientIds: [ownerId], params: { hostId: 'local', conversationId, following } });
   }
   receive(bytes) {
-    this.buffer = Buffer.concat([this.buffer, bytes]);
-    while (this.buffer.length >= 4) {
-      const size = this.buffer.readUInt32LE();
-      if (size > 32 * 1024 * 1024) { this.disconnect(fail('CODEX_IPC_FRAME_TOO_LARGE', 'unknown')); this.socket.destroy(); return; }
-      if (this.buffer.length < size + 4) return;
+    let offset = 0;
+    while (offset < bytes.length && this.connected) {
+      if (!this.frame) {
+        const count = Math.min(4 - this.headerBytes, bytes.length - offset);
+        bytes.copy(this.header, this.headerBytes, offset, offset + count); this.headerBytes += count; offset += count;
+        if (this.headerBytes < 4) return;
+        const size = this.header.readUInt32LE(); this.headerBytes = 0;
+        if (size > MAX_FRAME_BYTES) { this.disconnect(fail('CODEX_IPC_FRAME_TOO_LARGE', 'unknown')); this.socket.destroy(); return; }
+        this.frame = Buffer.allocUnsafe(size); this.frameBytes = 0;
+      }
+      // Copy each chunk once instead of repeatedly copying the growing history.
+      const count = Math.min(this.frame.length - this.frameBytes, bytes.length - offset);
+      bytes.copy(this.frame, this.frameBytes, offset, offset + count); this.frameBytes += count; offset += count;
+      if (this.frameBytes < this.frame.length) return;
       let frame;
-      try { frame = JSON.parse(this.buffer.subarray(4, size + 4).toString('utf8')); }
+      try { frame = JSON.parse(this.frame.toString('utf8')); }
       catch { this.disconnect(fail('CODEX_IPC_INVALID_FRAME', 'unknown')); this.socket.destroy(); return; }
-      this.buffer = this.buffer.subarray(size + 4);
+      this.frame = null; this.frameBytes = 0;
       if (frame.type === 'client-discovery-request') {
         this.send({ type: 'client-discovery-response', requestId: frame.requestId, response: { canHandle: false } });
       } else if (frame.type === 'response') {
@@ -72,7 +85,7 @@ export class CodexIpc extends EventEmitter {
   disconnect(error) {
     const wasConnected = this.connected; this.connected = false;
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
-    this.pending.clear(); this.buffer = Buffer.alloc(0);
+    this.pending.clear(); this.headerBytes = 0; this.frame = null; this.frameBytes = 0;
     if (wasConnected) this.emit('disconnected', error);
   }
   close() { this.disconnect(fail('CODEX_IPC_CLOSED', 'unknown')); this.socket?.destroy(); }

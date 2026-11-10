@@ -76,6 +76,19 @@ test('JSON observer preserves split Unicode and partial-line boundaries', () => 
   observer.push(Buffer.from('{')); assert.equal(observer.atBoundary, false);
 });
 
+test('a child directory connects through its recursive parent and live revocation keeps the native process intact', async t => {
+  const h = await harness(t, [], async ({ directory }) => {
+    await writeFile(join(directory, 'config.json'), JSON.stringify({ enabled: true, directories: [dirname(directory)],
+      directoryScopes: [{ path: dirname(directory), enabled: true, recursive: true }] }));
+  });
+  const first = await h.status(); assert.equal(first.state.controlsEnabled, true);
+  await writeFile(join(h.directory, 'config.json'), JSON.stringify({ enabled: true, directories: [dirname(h.directory)],
+    directoryScopes: [{ path: dirname(h.directory), enabled: true, recursive: false }] }));
+  const revoked = await h.status(); assert.equal(revoked.state.controlsEnabled, false); assert.equal(revoked.state.canCompact, false);
+  assert.equal(revoked.state.childPid, first.state.childPid); assert.equal(h.processHandle.exitCode, null);
+  assert.equal((await h.compact()).httpStatus, 403);
+});
+
 test('Claude runtime accepts controller operation options through the real wrapper for prompt, interrupt and compact', async t => {
   const h = await harness(t), runtime = new ClaudeRuntime(h.id, { folder: join(h.directory, 'instances') });
   const promptId = randomUUID(), interruptId = randomUUID(), compactId = randomUUID();
@@ -146,6 +159,46 @@ test('deferring an unverified sender clears the prepared peer intent and does no
   assert.equal(result.status, 'deferred'); const state = await runtime.status();
   assert.equal(state.pendingPeerMessages, 0); assert.equal(state.activity, 'idle');
   assert.equal(h.messages.some(m => m.fixtureReceivedExactly), false);
+});
+
+test('real wrapper reports a native parity hold to the sender within the submission result', async t => {
+  const h = await harness(t), runtime = new ClaudeRuntime(h.id, { folder: join(h.directory, 'instances') }), id = randomUUID();
+  runtime.sendPeer = async ({ messageId }) => {
+    h.send({ type: 'fixture_peer_hold', uuid: messageId, state: 'held', cause: 'mode-mismatch' });
+    return { status: 'submitted', transport: 'claude-peer-inbox', messageId };
+  };
+  const result = await runtime.sendMessage('held by native policy', { requestId: id });
+  assert.equal(result.status, 'submitted'); assert.equal(result.nativeDelivery?.state, 'held'); assert.equal(result.nativeDelivery.cause, 'mode-mismatch');
+  assert.match(result.detail, /权限类别不一致/);
+  h.send({ type: 'fixture_peer_hold', uuid: id, state: 'dropped', outcome: 'expired' });
+  const settled = await until(async () => { const s = (await h.status()).state; return s.peerDeliveries?.find(e => e.messageId === id && e.state === 'dropped') && s; }, 'native drop logged');
+  assert.equal(settled.peerDeliveries.find(e => e.messageId === id).outcome, 'expired'); assert.equal(settled.pendingPeerMessages, 0);
+});
+
+const crossModeConfig = (directory, accept) => writeFile(join(directory, 'config.json'), JSON.stringify({ enabled: true, directories: [directory], peerCrossModeAccept: accept }));
+test('real wrapper applies the cross-mode switch to its own Claude flag layer, reads it back, and clears it live', async t => {
+  const h = await harness(t, [], ({ directory }) => crossModeConfig(directory, true));
+  const applied = await until(async () => { const s = (await h.status()).state; return s.peerInbound?.verifiedAt && s; }, 'cross-mode accept verified');
+  assert.equal(applied.capabilities.peerInboundControl, true);
+  assert.deepEqual([applied.peerInbound.mode, applied.peerInbound.effective, applied.peerInbound.decidedBy], ['accept', 'accept', 'flagSettings']);
+  assert.deepEqual(h.messages.filter(m => m.type === 'fixture_flag_settings').map(m => m.settings), [{ crossSessionInbound: 'accept' }]);
+  assert.doesNotMatch(JSON.stringify(applied), /PRIVATE_FIXTURE_TOKEN|must-not-leave/);
+  assert.equal(h.messages.some(m => m.type === 'control_response' && String(m.response?.request_id).startsWith('cooperation-')), false, 'wrapper replies never reach the IDE');
+  await crossModeConfig(h.directory, false);
+  const cleared = await until(async () => { const s = (await h.status()).state; return s.peerInbound?.mode === 'default' && s.peerInbound.verifiedAt && s; }, 'cross-mode accept cleared');
+  assert.equal(cleared.peerInbound.effective, null);
+  assert.deepEqual(h.messages.filter(m => m.type === 'fixture_flag_settings').at(-1).settings, {}, 'disabling removes the key instead of forcing a hold');
+});
+
+test('a managed crossSessionInbound setting overriding the switch is reported, and a rejected apply is not retried on every poll', async t => {
+  const managed = await harness(t, [], async ({ directory }) => { await crossModeConfig(directory, true); return { env: { COOP_FIXTURE_POLICY_INBOUND: 'hold' } }; });
+  const overridden = await until(async () => { const s = (await managed.status()).state; return s.peerInbound?.verifiedAt && s; }, 'managed override observed');
+  assert.deepEqual([overridden.peerInbound.mode, overridden.peerInbound.effective, overridden.peerInbound.decidedBy], ['accept', 'hold', 'policySettings']);
+  const rejected = await harness(t, [], async ({ directory }) => { await crossModeConfig(directory, true); return { env: { COOP_FIXTURE_REJECT_FLAGS: '1' } }; });
+  const failed = await until(async () => { const s = (await rejected.status()).state; return s.peerInbound?.state === 'failed' && s; }, 'rejected apply observed');
+  for (let i = 0; i < 5; i++) await rejected.status();
+  assert.equal(failed.peerInbound.mode, 'default');
+  assert.equal(rejected.messages.filter(m => m.type === 'fixture_flag_settings').length, 1);
 });
 
 test('dropping a held peer does not stop current work or erase a genuine quota failure', () => {
@@ -328,6 +381,17 @@ test('external prompt, passive busy usage, exact interrupt and same-process resu
   const duplicate = await h.control('prompt', resumed.request); assert.equal(duplicate.body.status, 'submitted');
   assert.equal(h.messages.filter(m => m.fixtureReceivedExactly && m.uuid === resumed.request.requestId).length, 1);
   assert.equal((await h.control('prompt', { ...resumed.request, text: 'changed' })).body.status, 'request_id_conflict');
+});
+
+test('a session already working before any idle query learns its window from one local mid-turn read', { skip: process.platform !== 'win32' }, async t => {
+  const h = await harness(t);
+  h.send({ type: 'user', session_id: h.id, message: { role: 'user', content: 'hold' } });
+  const working = await until(async () => { const s = (await h.status()).state; return s.activity === 'running' && s.usage?.contextWindowTokens > 0 && s; }, 'window learned while running');
+  assert.equal(working.usage.source, 'claude-passive-api-usage'); assert.equal(working.usage.usedTokens, 120050);
+  assert.equal(working.usage.contextWindowTokens, 200000); assert.equal(working.usage.usedPercent, 60.03);
+  for (let i = 0; i < 3; i++) await h.status();
+  assert.deepEqual(h.messages.filter(m => m.type === 'fixture_context_request').map(m => m.detail), ['summary'], 'one local summary read, no token-count calls');
+  assert.equal(h.messages.some(m => m.type === 'control_response' && String(m.response?.request_id).startsWith('cooperation-')), false);
 });
 
 test('permission interruption cancels the native request without answering it', { skip: process.platform !== 'win32' }, async t => {
