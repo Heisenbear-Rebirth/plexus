@@ -7,7 +7,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { resolve, join, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ManagementStore } from '../src/management-store.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 import { MaintenanceController } from '../src/maintenance-controller.mjs';
 import { PromptSettings } from '../src/prompt-settings.mjs';
 import { defaultPromptValues } from '../public/prompt-templates.mjs';
@@ -183,8 +183,8 @@ test('a disconnected snapshot subscription reports the transport failure without
 });
 
 for (const order of ['manager-first', 'client-first']) test(`Codex IPC reconnect after ${order} restart continues the persisted failed turn once with original settings`, async t => {
-  const h = await harness(t), root = await mkdtemp(join(resolve('.cooperation'), 'codex-restart-'));
-  let store = await new ManagementStore(join(root, '.cooperation')).init(), controller;
+  const h = await harness(t), root = await mkdtemp(join(resolve('.plexus'), 'codex-restart-'));
+  let store = await new ManagementStore(join(root, '.plexus')).init(), controller;
   const target = { client: 'codex', id: sessionId, cwd: root };
   let used = 100;
   const native = state('idle', 'failed-before-restart'); native.cwd = root;
@@ -199,13 +199,13 @@ for (const order of ['manager-first', 'client-first']) test(`Codex IPC reconnect
     controller = new MaintenanceController({ root, store, monitor, service: { adapters: { codex: { find: async () => target } } } });
     controller.quotaRecovery.readCodex = async () => ({ rateLimits: { primary: { usedPercent: used } } });
   };
-  t.after(async () => { await controller.close(); store.close(); assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await controller.close(); store.close(); assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   start(); store.savePolicy(target, { enabled: true, mode: 'automatic' }); await controller.tick();
   assert.equal(store.getSetting(quotaSettingKey(target)).state, 'waiting');
   store.setSetting(quotaSettingKey(target), {...store.getSetting(quotaSettingKey(target)),resumeBound:false,blockedReason:'Historical subagent guard from previous version'});
   await controller.close(); store.close();
   if (order === 'client-first') { h.restartNative(); await new Promise(resolve => setTimeout(resolve, 30)); }
-  store = await new ManagementStore(join(root, '.cooperation')).init(); start();
+  store = await new ManagementStore(join(root, '.plexus')).init(); start();
   if (order === 'manager-first') { h.restartNative(); await new Promise(resolve => setTimeout(resolve, 30)); }
   used = 5; await controller.tick(); await controller.tick();
   assert.equal(store.getSetting(quotaSettingKey(target)).state, 'submitted');
@@ -317,8 +317,8 @@ test('account-only quota blocks native compaction and new controls without conve
 });
 
 test('Codex IPC and manager poll an ambiguous limited head, wait for synchronization, then continue once with native settings', async t => {
-  const h = await harness(t), root = await mkdtemp(join(resolve('.cooperation'), 'codex-quota-sync-'));
-  const store = await new ManagementStore(join(root, '.cooperation')).init();
+  const h = await harness(t), root = await mkdtemp(join(resolve('.plexus'), 'codex-quota-sync-'));
+  const store = await new ManagementStore(join(root, '.plexus')).init();
   const target = { client: 'codex', id: sessionId, cwd: root };
   const source = state(); source.cwd = root;
   const failed = { turnId: 'pending-sync', status: 'failed', error: { codexErrorInfo: 'usageLimitExceeded' }, items: [] };
@@ -331,7 +331,7 @@ test('Codex IPC and manager poll an ambiguous limited head, wait for synchroniza
   const controller = new MaintenanceController({ root, store, service: {}, monitor });
   controller.quotaRecovery.readCodex = async () => { reads++; return { rateLimits: { primary: { usedPercent: 5 } } }; };
   store.savePolicy(target, { enabled: true, mode: 'automatic' });
-  t.after(async () => { await controller.close(); store.close(); assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await controller.close(); store.close(); assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   await controller.tick();
   let record = store.getSetting(quotaSettingKey(target)); assert.equal(record.state, 'waiting'); assert.equal(reads, 1);
   assert.match(record.reason, /轮次记录同步/);
@@ -350,8 +350,8 @@ test('Codex IPC and manager poll an ambiguous limited head, wait for synchroniza
 });
 
 test('Claude peer to exhausted Codex: stale snapshot still defers, then native custom continuation precedes FIFO without changing settings', async t => {
-  const h = await harness(t), root = await mkdtemp(join(resolve('.cooperation'), 'codex-peer-quota-'));
-  const store = await new ManagementStore(join(root, '.cooperation')).init();
+  const h = await harness(t), root = await mkdtemp(join(resolve('.plexus'), 'codex-peer-quota-'));
+  const store = await new ManagementStore(join(root, '.plexus')).init();
   const target = { client: 'codex', id: sessionId, cwd: root, name: 'receiver' }, sender = { client: 'claude', id: randomUUID(), cwd: root, name: 'sender' };
   let quotaUsed = 100, contextUsed = 10; const delivered = [];
   const native = (status, id) => { const value = state(status, id); value.cwd = root; return value; };
@@ -366,7 +366,7 @@ test('Claude peer to exhausted Codex: stale snapshot still defers, then native c
       h.setState(value); return { status: 'submitted' };
     } },
   };
-  const service = new CooperationService({ root, store, adapters, runtimeFactory: h.makeRuntime });
+  const service = new PlexusService({ root, store, adapters, runtimeFactory: h.makeRuntime });
   const monitor = { runtime: () => h.runtime, close: () => h.runtime.close(), sample: async () => {
     const runtime = await h.runtime.status(), usage = { usedTokens: contextUsed, contextWindowTokens: 100, contextEpoch: 1 };
     const sample = { session: target, runtime, usage, decision: evaluatePolicy({ runtime, usage, policy: store.getPolicy(target) }) };
@@ -377,7 +377,7 @@ test('Claude peer to exhausted Codex: stale snapshot still defers, then native c
     codex: { primary: { usedPercent: quotaUsed, resetsAt: 1000 }, secondary: { usedPercent: 20, resetsAt: 2000 } },
   } });
   t.after(async () => { await controller.close(); await service.mailbox.close(); await service.lifecycle.close(); store.close();
-    assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+    assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   store.savePolicy(target, { enabled: true, mode: 'automatic' });
   const values = defaultPromptValues(); values.maintenance.quotaContinue = '按已保存的提示词继续 Codex 原任务。'; await new PromptSettings(root).save(values, 0);
   await monitor.sample();

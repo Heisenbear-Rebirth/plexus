@@ -61,7 +61,7 @@ export function prepareText(text) {
 }
 async function main() {
   const action = process.argv[2];
-  const directory = join(root, '.cooperation', 'backups');
+  const directory = join(root, '.plexus', 'backups');
   const manifestPath = join(directory, 'vscode-wrapper-change.json');
   if (action === 'prepare') {
     const original = await readFile(target); const text = original.toString('utf8'); const prepared = prepareText(text);

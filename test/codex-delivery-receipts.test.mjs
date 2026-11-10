@@ -9,7 +9,7 @@ import { ManagementStore, sessionKey } from '../src/management-store.mjs';
 import { SessionMailbox } from '../src/session-mailbox.mjs';
 
 async function fixture(t) {
-  const base = resolve('.cooperation'), root = await mkdtemp(join(base, 'delivery-receipt-'));
+  const base = resolve('.plexus'), root = await mkdtemp(join(base, 'delivery-receipt-'));
   const store = await new ManagementStore(root).init();
   const from = { client: 'claude', id: randomUUID(), name: 'sender', cwd: root }, to = { client: 'codex', id: randomUUID(), name: 'receiver', cwd: root };
   const record = text => ({ id: randomUUID(), createdAt: '2026-10-18T08:30:00.000Z', from, to, text });

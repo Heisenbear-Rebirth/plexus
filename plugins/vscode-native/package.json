@@ -1,8 +1,8 @@
 {
-  "name": "cooperation-native-sessions",
-  "displayName": "Cooperation Native Sessions",
+  "name": "plexus-native-sessions",
+  "displayName": "Plexus Native Sessions",
   "version": "0.1.0",
-  "publisher": "cooperation-local",
+  "publisher": "plexus-local",
   "engines": { "vscode": "^1.100.0" },
   "main": "./extension.cjs",
   "activationEvents": ["onStartupFinished"],

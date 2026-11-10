@@ -79,7 +79,7 @@ test(`Claude sender uses published peer auth, exact target and supplied text aga
   const root = await fixture(t);
   const cwd = path.join(root, 'test-workspace');
   const id = randomUUID();
-  const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\${namespace}coop-claude-mock-${process.pid}-${randomUUID()}` : path.join(root, 'inbox.sock');
+  const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\${namespace}plexus-claude-mock-${process.pid}-${randomUUID()}` : path.join(root, 'inbox.sock');
   const token = 'a'.repeat(32);
   const endpointHash = createHash('sha256').update(process.platform === 'win32' ? endpoint.toLowerCase() : endpoint).digest('hex');
   await registry(root, id, cwd, { messagingSocketPath: endpoint });
@@ -155,7 +155,7 @@ test('Windows peer inbox validation rejects remote and unsupported paths before 
 
 test('Windows LOCAL peer inbox retains key and process-lifetime checks', { skip: process.platform !== 'win32' }, async t => {
   const root = await fixture(t), id = randomUUID(), cwd = path.join(root, 'workspace');
-  const endpoint = `\\\\.\\pipe\\LOCAL\\coop-claude-mock-${process.pid}-${randomUUID()}`;
+  const endpoint = `\\\\.\\pipe\\LOCAL\\plexus-claude-mock-${process.pid}-${randomUUID()}`;
   const endpointHash = createHash('sha256').update(endpoint.toLowerCase()).digest('hex');
   const keyPath = path.join(root, 'sessions', `${process.pid}.${endpointHash}.key`);
   await registry(root, id, cwd, { messagingSocketPath: endpoint });

@@ -2,15 +2,15 @@
 
 > 研究归档：用户之后已要求实现，现已完成软/硬流程与隔离原生验证。当前实现、限制和使用方法见 [OPENCODE-MAINTENANCE.md](OPENCODE-MAINTENANCE.md)。以下保留实施前的研究结论。
 
-2026-09-18。用户要求先思考研究，尚未开始功能实现。本轮阅读 Cooperation 源码、项目内 SDK/OpenAPI 和 OpenCode v1.18.30 上游源码，没有调用原生中断、压缩、创建或重启接口，没有访问其他业务目录或会话。
+2026-09-18。用户要求先思考研究，尚未开始功能实现。本轮阅读 Plexus 源码、项目内 SDK/OpenAPI 和 OpenCode v1.18.30 上游源码，没有调用原生中断、压缩、创建或重启接口，没有访问其他业务目录或会话。
 
 ## 结论
 
-OpenCode 具备实现 Cooperation 自动上下文维护所需的主要原生能力，可以接入“交付 → 压缩 → 恢复 → 按原活动继续”的流程。当前禁用来自 Cooperation 的未完成集成，不是 OpenCode 原生不支持，也不是用户要求禁用。
+OpenCode 具备实现 Plexus 自动上下文维护所需的主要原生能力，可以接入“交付 → 压缩 → 恢复 → 按原活动继续”的流程。当前禁用来自 Plexus 的未完成集成，不是 OpenCode 原生不支持，也不是用户要求禁用。
 
 方案覆盖软阈值和强阈值。强停的轮次竞争、后台任务可观察性，以及原生自动压缩与维护流程的协调，是实现前必须用隔离后端验证的重点；仅凭公开 API 存在，不能宣称完整流程已经验收。尤其公开 abort 接口不提供 expectedTurnId 原子条件，前后读状态不能证明绝无竞争窗口。
 
-本功能维护已经存在的会话，不需要恢复已取消的主动创建/加载原生会话功能。产品可按用户配置管理多个目录，开发助手仍只在 Cooperation 内研究和测试。
+本功能维护已经存在的会话，不需要恢复已取消的主动创建/加载原生会话功能。产品可按用户配置管理多个目录，开发助手仍只在 Plexus 内研究和测试。
 
 ## 1. 为什么当前代码禁用
 
@@ -29,16 +29,16 @@ OpenCode 具备实现 Cooperation 自动上下文维护所需的主要原生能�
 
 ## 2. 原生能力与已核实的语义
 
-核对依据为本项目锁定的 SDK/plugin 1.18.30、`.cooperation/opencode/openapi.json` 以及上游 v1.18.30 对应源码。网站概述及旧SDK类型不足以描述全部行为。
+核对依据为本项目锁定的 SDK/plugin 1.18.30、`.plexus/opencode/openapi.json` 以及上游 v1.18.30 对应源码。网站概述及旧SDK类型不足以描述全部行为。
 
 ### 状态、控制提示和回执
 
-- `session.status` 只报告idle/busy/retry，idle会从状态表移除；它不提供Cooperation需要的activeTurnId、权限等待或后台任务全貌。
+- `session.status` 只报告idle/busy/retry，idle会从状态表移除；它不提供Plexus需要的activeTurnId、权限等待或后台任务全貌。
 - `prompt_async` 支持指定messageID、model、agent、variant，返回204后实际处理仍在进行。
-- assistant记录有parentID、time.completed、finish、error，工具parts有运行/完成状态。需把Cooperation的控制user messageID与对应assistant/tool记录、原生idle联合核对。
+- assistant记录有parentID、time.completed、finish、error，工具parts有运行/完成状态。需把Plexus的控制user messageID与对应assistant/tool记录、原生idle联合核对。
 - 维护提示应保留原agent/model/variant，并核对权限指纹。上游createUserMessage会按传入/默认值更新会话的agent/model；省略agent并不保证保留原agent。
 - 不传`tools`覆盖原权限：上游prompt会根据该字段重写session.permission。
-- 插件ToolContext提供sessionID、messageID、directory、agent和abort；可新增`cooperation_context_checkpoint`，由manager向插件取回绑定身份的原始参数。
+- 插件ToolContext提供sessionID、messageID、directory、agent和abort；可新增`plexus_context_checkpoint`，由manager向插件取回绑定身份的原始参数。
 - 回执除了cycle/stage/token/文档哈希，还应核对调用它的assistant是否属于该阶段控制user messageID；接收工具回执后仍需等待控制轮次真正结束。
 
 ### 手动压缩
@@ -47,14 +47,14 @@ OpenCode 具备实现 Cooperation 自动上下文维护所需的主要原生能�
 - 建议显式`auto:false`。标准成功路径创建compaction user part及summary assistant；不走auto=true的自动续跑分支，适合压缩之后先单独恢复交付文档。
 - handler等待prompt loop之后返回true；模型压缩失败可以由消息error表示，因此true不等于成功压缩。
 - 成功证据：新出现的compaction part、与其user messageID对应的summary assistant、完成时间/finish且无error、原生回到idle。`session.compacted`用作及时通知，不能独自充当对应请求的完成证明。
-- `session.compacted`只有sessionID，没有Cooperation的cycle/requestId。压缩接口也不接受客户端指定的compaction messageID。需要记录操作前消息边界和持久化意图，再关联新增原生记录；遇其他压缩或用户输入竞争时停止自动推进。
+- `session.compacted`只有sessionID，没有Plexus的cycle/requestId。压缩接口也不接受客户端指定的compaction messageID。需要记录操作前消息边界和持久化意图，再关联新增原生记录；遇其他压缩或用户输入竞争时停止自动推进。
 - 原生压缩模型可由用户的compaction agent配置覆盖；应区分压缩专用模型与业务会话模型，不能因此擅自修改用户设置。
 - 压缩模型使用`tools:{}`，不能指望在压缩摘要生成阶段完成写交付文档/工具回执。它们需要单独的维护控制轮次。
 
 ### 中断、后台工作与竞态
 
 - 原生abort调用SessionRunState.cancel，除主runner外还会递归取消匹配的后台任务。
-- 公共abort只按sessionID操作，没有expectedTurnId或状态revision条件。Cooperation自己的mutex只能串行化自己的调用，无法单独排除用户原生输入。
+- 公共abort只按sessionID操作，没有expectedTurnId或状态revision条件。Plexus自己的mutex只能串行化自己的调用，无法单独排除用户原生输入。
 - 需要结合chat.message、message/part事件、权限/提问事件、children及工具任务状态构造运行观察，维护期间用户新输入优先让维护暂停。不能静默丢弃用户输入。
 - `GET /permission`、`GET /question`可用于恢复待处理请求状态；读取后仅保留目标session的数据。
 - `/experimental/session/{sessionID}/background`是POST“将阻塞子任务转为后台”，不是只读任务列表；不能拿它当探测接口。
@@ -64,16 +64,16 @@ OpenCode 具备实现 Cooperation 自动上下文维护所需的主要原生能�
 ### 原生自动压缩的协调
 
 - `experimental.session.compacting`允许加入交付文档索引或摘要上下文。
-- `experimental.compaction.autocontinue`可在标准自动续跑路径设enabled=false；只应作用于当前Cooperation维护cycle。
+- `experimental.compaction.autocontinue`可在标准自动续跑路径设enabled=false；只应作用于当前Plexus维护cycle。
 - overflow恢复存在重放先前user消息的分支，绕开上述autocontinue hook，不能宣称一个hook就能拦住所有自动续跑。
-- 原生自动压缩保持用户配置。Cooperation阈值应给交付轮次和原生压缩预留空间；维护途中遇原生提前压缩，必须识别边界并重新判定或暂停，不能把它自动归为本次手动压缩成功。
+- 原生自动压缩保持用户配置。Plexus阈值应给交付轮次和原生压缩预留空间；维护途中遇原生提前压缩，必须识别边界并重新判定或暂停，不能把它自动归为本次手动压缩成功。
 
 ## 3. 拟实现流程
 
 ```text
 每会话独立开关与阈值
   → 获取可信用量、原生实例、轮次、权限/提问及后台工作状态
-  → 创建维护cycle并锁住该目标的Cooperation消息队列
+  → 创建维护cycle并锁住该目标的Plexus消息队列
   → 软阈值：等待业务空闲；强阈值：确认目标轮次后请求中断
   → 等待原业务轮次及工具执行结束
   → 发送写交付文档提示
@@ -83,10 +83,10 @@ OpenCode 具备实现 Cooperation 自动上下文维护所需的主要原生能�
   → 发送读取交付文档与恢复上下文提示
   → 收到restored回执 + 确认对应控制轮次结束
   → 触发前正在工作：发送继续提示；原本空闲：保持空闲
-  → 释放Cooperation消息队列
+  → 释放Plexus消息队列
 ```
 
-软阈值尚未空闲时只观察，达到可触发条件才创建维护cycle并持锁。用户原生输入不在Cooperation FIFO内，需单独检测并尊重用户介入。
+软阈值尚未空闲时只观察，达到可触发条件才创建维护cycle并持锁。用户原生输入不在Plexus FIFO内，需单独检测并尊重用户介入。
 
 每个控制操作采用独立操作ID、调用参数指纹、原生messageID及阶段ledger，提交前先保存意图。未知投递不盲重发，未知压缩不再次压缩。插件/manager重连后回读指定原生消息和有界分页历史，结合已有回执和文档哈希恢复；证据不足显示需要处理。
 
@@ -111,7 +111,7 @@ OpenCode 具备实现 Cooperation 自动上下文维护所需的主要原生能�
 
 最终验收包含软/硬阈值、多工具轮次、空闲不误续跑、控制轮次回执与结束分离、原生自动压缩竞争、用户新输入/模型切换、权限等待、后台子任务、未知响应不重试、两个层级重启恢复、多目录隔离、TUI/Web状态与重开持久性。
 
-本轮没有运行上述原生验收。后续验证应在Cooperation内独立root/原生数据目录中进行，显式fixture adapters/runtime及startMonitoring:false用于自动测试；真实模型验证另用专用隔离会话，不复用用户业务会话或此前已取消实验授权。自动维护的启用与会话创建功能的取消标记应完全分开。
+本轮没有运行上述原生验收。后续验证应在Plexus内独立root/原生数据目录中进行，显式fixture adapters/runtime及startMonitoring:false用于自动测试；真实模型验证另用专用隔离会话，不复用用户业务会话或此前已取消实验授权。自动维护的启用与会话创建功能的取消标记应完全分开。
 
 ## 6. 资料索引
 
@@ -123,4 +123,4 @@ OpenCode 具备实现 Cooperation 自动上下文维护所需的主要原生能�
 - [v1.18.30 prompt：agent/model/variant与权限更新](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/prompt.ts)
 - [v1.18.30 原生压缩阈值](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/overflow.ts)
 - [v1.18.30 插件事件映射与异步回调](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/plugin/index.ts)
-- 本地类型：`plugins/node_modules/@opencode-ai/plugin/dist/index.d.ts`、`tool.d.ts`；实际协议：`.cooperation/opencode/openapi.json`。
+- 本地类型：`plugins/node_modules/@opencode-ai/plugin/dist/index.d.ts`、`tool.d.ts`；实际协议：`.plexus/opencode/openapi.json`。

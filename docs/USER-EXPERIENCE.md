@@ -8,7 +8,7 @@
 - 按钮按下即时反馈，悬停位移只用于精细指针。键盘切换及 Esc 立即响应；“减少动态效果”使用短淡入，并取消位移、抽屉、开关和折叠的空间动画。
 - 使用浏览器原生 CSS 过渡及 Web Animations API，没有新增依赖。原生详情动画能力不支持时即时展开，功能保持可用。
 
-验证：290 项自动测试通过；10 组动画专项、8 组交互连续性和 8 组重启确认浏览器检查通过，页面错误均为 0。动画专项检查了中间帧、快速反向切换、后台刷新、键盘操作、原生折叠、提示消息、390px 导航、减少动态效果及文本选择。记录见 `.cooperation/verification/motion-browser.json`、`apple-design-polish-browser.json`、`restart-confirmation-browser.json` 和 `motion-full-tests.txt`。
+验证：290 项自动测试通过；10 组动画专项、8 组交互连续性和 8 组重启确认浏览器检查通过，页面错误均为 0。动画专项检查了中间帧、快速反向切换、后台刷新、键盘操作、原生折叠、提示消息、390px 导航、减少动态效果及文本选择。记录见 `.plexus/verification/motion-browser.json`、`apple-design-polish-browser.json`、`restart-confirmation-browser.json` 和 `motion-full-tests.txt`。
 
 本次仅更新前端资源；当前管理服务读取最新文件，刷新页面即可使用。
 
@@ -32,7 +32,7 @@
 - 移动端扩大主要触控区域至至少 44px。导航打开后焦点留在面板内，关闭时回到菜单按钮；选中会话后进入内容标题。导航可以在开合途中反向操作。
 - 按钮按下时即时反馈；侧栏和弹窗采用短过渡，并支持减少动态效果、减少透明度和增强对比度。调整窗口大小不播放导航开合动画。
 
-本轮以项目内的隔离服务和 Chrome 验证桌面及 390px 视口，覆盖草稿、撤销、保存失败、保存中关闭、焦点保持、消息文字选择、移动导航和维护动作。证据见 `.cooperation/verification/apple-design-polish-browser.json`；移动布局验证未使用实体手机。正式发布仅替换前端资源，管理服务与原生客户端无需重启。
+本轮以项目内的隔离服务和 Chrome 验证桌面及 390px 视口，覆盖草稿、撤销、保存失败、保存中关闭、焦点保持、消息文字选择、移动导航和维护动作。证据见 `.plexus/verification/apple-design-polish-browser.json`；移动布局验证未使用实体手机。正式发布仅替换前端资源，管理服务与原生客户端无需重启。
 
 ## 交付确认被拒绝的修复
 
@@ -53,7 +53,7 @@
 
 隔离 Chrome 验证了连接设置入口、已连接反馈、三步进度、主要恢复按钮、诊断复制、取消确认和 390px 布局，页面错误为 0。测试浏览器的资料、缓存和临时文件均保存在项目内，诊断复制使用页面内模拟剪贴板。
 
-项目本机证据：`.cooperation/verification/receipt-before-tests.txt`、`receipt-native-wrapper.txt`、`user-experience-full-tests.txt`、`user-experience-browser.json`、`user-experience-deployment.json`。
+项目本机证据：`.plexus/verification/receipt-before-tests.txt`、`receipt-native-wrapper.txt`、`user-experience-full-tests.txt`、`user-experience-browser.json`、`user-experience-deployment.json`。
 
 ## 重启恢复提示（2026-10-04）
 

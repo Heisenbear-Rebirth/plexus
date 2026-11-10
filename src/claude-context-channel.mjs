@@ -42,7 +42,7 @@ export class NativeContextChannel {
   owns(id) {
     if (typeof id !== 'string') return false;
     for (const kind of ['context', 'interrupt', 'flags']) {
-      const prefix = `cooperation-${kind}-${this.namespace}-`;
+      const prefix = `plexus-${kind}-${this.namespace}-`;
       if (id.startsWith(prefix)) { const suffix = id.slice(prefix.length); return /^[1-9]\d*$/.test(suffix) && Number(suffix) <= this.sequence; }
     }
     return false;
@@ -63,7 +63,7 @@ export class NativeContextChannel {
   // does not take the idle query slot. The caller still writes at a line boundary.
   applyFlagSettings(settings) {
     if (this.requests.size >= 32) return Promise.reject(new Error('Too many pending native control requests.'));
-    const requestId = `cooperation-flags-${this.namespace}-${++this.sequence}`;
+    const requestId = `plexus-flags-${this.namespace}-${++this.sequence}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.requests.delete(requestId)) reject(Object.assign(new Error('Native flag settings request timed out; outcome unknown.'), { outcome: 'unknown' }));
@@ -76,7 +76,7 @@ export class NativeContextChannel {
   async request(subtype, transform, { fields = {}, gate = subtype } = {}) {
     if (this.active || this.requests.size >= 32 || !this.canQuery(gate)) throw new Error('The session is not at an available input boundary.');
     this.active = true;
-    const requestId = `cooperation-${subtype === 'interrupt' ? 'interrupt' : 'context'}-${this.namespace}-${++this.sequence}`;
+    const requestId = `plexus-${subtype === 'interrupt' ? 'interrupt' : 'context'}-${this.namespace}-${++this.sequence}`;
     this.currentRequestId = requestId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -108,8 +108,8 @@ export class NativeContextChannel {
       this.parts = []; this.size = 0;
       let message;
       // Only replies to our own requests are withheld, and each carries a
-      // cooperation- request ID; every other line is forwarded without parsing.
-      if (!this.passthrough && line.includes('control_response') && line.includes('cooperation-')) {
+      // plexus- request ID; every other line is forwarded without parsing.
+      if (!this.passthrough && line.includes('control_response') && line.includes('plexus-')) {
         try { message = JSON.parse(line.toString('utf8')); } catch { /* forward unchanged */ }
       }
       const owned = message?.type === 'control_response' ? this.requests.get(message.response?.request_id) : null;

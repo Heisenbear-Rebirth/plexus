@@ -19,8 +19,8 @@ async function fixture(t) {
     runtimeFactory: () => ({ status: async () => ({ connected: true, activity: 'idle', sessionId: target.id, cwd, permissionMode: 'bypassPermissions', capabilities: {} }), close() {} }) });
   t.after(async () => { await server.close(); assert.ok(root.startsWith(resolve('.') + '\\') || root.startsWith(resolve('.') + '/')); await rm(root, { recursive: true, force: true }); });
   const config = await (await fetch(server.url + '/api/config')).json();
-  const connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8'));
-  const ui = (body, token = config.csrfToken) => fetch(server.url + '/api/session-hook', { method: 'POST', headers: { 'content-type': 'application/json', 'x-coop-ui': token }, body: JSON.stringify(body) });
+  const connection = JSON.parse(await readFile(join(root, '.plexus', 'connection.json'), 'utf8'));
+  const ui = (body, token = config.csrfToken) => fetch(server.url + '/api/session-hook', { method: 'POST', headers: { 'content-type': 'application/json', 'x-plexus-ui': token }, body: JSON.stringify(body) });
   const notify = (key, body) => fetch(server.url + '/api/hooks/notify', { method: 'POST', headers: { 'content-type': 'application/json', ...(key ? { authorization: 'Bearer ' + key } : {}) }, body: JSON.stringify(body) });
   return { root, server, payloads, ui, notify, connection };
 }
@@ -31,7 +31,7 @@ test('the management page opens one interface per session; its key wakes that se
   assert.deepEqual(await (await f.ui({ address: 'claude:' + target.id, action: 'get' })).json(), { hook: null }, 'nothing exists until requested');
   const { hook } = await (await f.ui({ address: 'claude:' + target.id, action: 'create' })).json();
   assert.match(hook.key, /^hk_[0-9a-f]{16}\.[0-9a-f]{48}$/); assert.equal(hook.enabled, true);
-  assert.match(hook.command, /bin\/coop\.mjs" notify --hook hk_/); assert.equal(hook.http.url, f.server.url + '/api/hooks/notify');
+  assert.match(hook.command, /bin\/plexus\.mjs" notify --hook hk_/); assert.equal(hook.http.url, f.server.url + '/api/hooks/notify');
   assert.equal((await (await f.ui({ address: 'claude:' + target.id, action: 'create' })).json()).hook.key, hook.key, 'repeating create keeps the key');
   const sent = await (await f.notify(hook.key, { text: '任务已完成：结果在 out/report.md', source: 'ssh-vps job 42' })).json();
   assert.equal(sent.status, 'submitted'); assert.equal(sent.to, 'claude:' + target.id);

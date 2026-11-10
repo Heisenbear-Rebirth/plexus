@@ -11,7 +11,7 @@ function scopes(config) {
 }
 
 export async function readWrapperDirectories(root) {
-  try { const config = JSON.parse(await readFile(join(root, '.cooperation', 'claude-wrapper', 'config.json'), 'utf8'));
+  try { const config = JSON.parse(await readFile(join(root, '.plexus', 'claude-wrapper', 'config.json'), 'utf8'));
     return { enabled: config.enabled === true, directories: Array.isArray(config.directories) ? config.directories.filter(d => typeof d === 'string') : [],
       peerCrossModeAccept: config.peerCrossModeAccept === true,
       ...(Object.hasOwn(config, 'directoryScopes') ? { directoryScopes: scopes(config) } : {}) };
@@ -31,7 +31,7 @@ export class WrapperDirectorySettings {
   constructor(root) { this.root = root; this.pending = Promise.resolve(); }
   change(update, { knownPaths = [], create = false, validate } = {}) {
     const operation = this.pending.then(async () => {
-      const folder = join(this.root, '.cooperation', 'claude-wrapper');
+      const folder = join(this.root, '.plexus', 'claude-wrapper');
       const filename = join(folder, 'config.json'); let source = {};
       try { source = JSON.parse(await readFile(filename, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; if (!create) return source; }
       const next = { ...source, ...update(scopes(source), source) };
@@ -51,7 +51,7 @@ export class WrapperDirectorySettings {
   // their own Claude process; no Claude settings file is written.
   setPeerCrossModeAccept(enabled) {
     const operation = this.pending.then(async () => {
-      const folder = join(this.root, '.cooperation', 'claude-wrapper'), filename = join(folder, 'config.json');
+      const folder = join(this.root, '.plexus', 'claude-wrapper'), filename = join(folder, 'config.json');
       let source = {};
       try { source = JSON.parse(await readFile(filename, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       const next = { ...source, peerCrossModeAccept: enabled === true };

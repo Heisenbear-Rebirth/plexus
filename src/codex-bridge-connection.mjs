@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { join, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-const filename = root => join(root, '.cooperation', 'codex-bridge.json');
+const filename = root => join(root, '.plexus', 'codex-bridge.json');
 const validId = value => typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value);
 function validContext(value) {
   if (!value || !validId(value.callerThreadId) || typeof value.pipePath !== 'string' || value.pipePath.length > 512) return null;
@@ -36,7 +36,7 @@ export async function rememberCodexBridge(root, context = codexContextFromEnviro
   if (JSON.stringify(previous[0]) === JSON.stringify(selected)) return true;
   const contexts = [...new Map([selected, ...previous].map(value => [JSON.stringify(value), value])).values()].slice(0, 16);
   const file = filename(root), temporary = file + '.' + randomUUID() + '.tmp';
-  await mkdir(join(root, '.cooperation'), { recursive: true });
+  await mkdir(join(root, '.plexus'), { recursive: true });
   try {
     await writeFile(temporary, JSON.stringify({ version: 1, capturedAt: new Date().toISOString(), context: selected, contexts }) + '\n', { mode: 0o600 });
     await rename(temporary, file);
@@ -61,7 +61,7 @@ export class CodexBridgeConnection {
   setState(connected, hasCandidate = true) {
     const previous = this.state;
     this.state = { connected, state: connected ? 'connected' : hasCandidate ? 'disconnected' : 'waiting',
-      detail: connected ? 'Codex 已连接' : hasCandidate ? 'Codex 连接已断开，正在自动重连。' : '等待 Codex 接入；配置 Cooperation MCP 后打开 Codex 即可自动连接。',
+      detail: connected ? 'Codex 已连接' : hasCandidate ? 'Codex 连接已断开，正在自动重连。' : '等待 Codex 接入；配置 Plexus MCP 后打开 Codex 即可自动连接。',
       checkedAt: new Date().toISOString() };
     if (previous.state !== this.state.state) this.onUpdate(this.status());
   }

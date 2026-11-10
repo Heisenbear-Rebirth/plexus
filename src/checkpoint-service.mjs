@@ -77,7 +77,7 @@ export class CheckpointService {
     if (stage === 'restored' && documentHash !== cycle.documentHash) throw new Error('恢复时的交付文档与第一次回执的内容不一致。');
     const receipt = { at: new Date().toISOString(), from, documentPath: actual, documentHash, bytes: bytes.length, cycleId, stage,
       ...(from.client === 'opencode' ? { nativeUserMessageId: source.nativeUserMessageId, nativeMessageId: source.nativeMessageId } : {}) };
-    const backupDir = join(this.root, '.cooperation', 'handoff-copies', cycleId);
+    const backupDir = join(this.root, '.plexus', 'handoff-copies', cycleId);
     await mkdir(backupDir, { recursive: true });
     // A concurrent rejection may leave an unaccepted copy. Content-addressed
     // copies cannot poison a later valid attempt with a different document.

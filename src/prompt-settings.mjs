@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { defaultPromptValues, validatePromptValues } from '../public/prompt-templates.mjs';
 
-const filename = root => join(root, '.cooperation', 'prompt-settings.json');
+const filename = root => join(root, '.plexus', 'prompt-settings.json');
 function decode(text) {
   if (Buffer.byteLength(text) > 256 * 1024) throw Error('提示词配置文件过大。');
   const data = JSON.parse(text);
@@ -32,7 +32,7 @@ export class PromptSettings {
       const current = await this.read();
       if (expectedRevision !== current.revision) throw Object.assign(Error('提示词已在其他窗口修改；请重新打开设置后再保存。'), { statusCode: 409 });
       const next = { version: 1, revision: current.revision + 1, updatedAt: new Date().toISOString(), values: checked };
-      await mkdir(join(this.root, '.cooperation'), { recursive: true });
+      await mkdir(join(this.root, '.plexus'), { recursive: true });
       const file = filename(this.root), temporary = file + '.' + randomUUID() + '.tmp';
       try { await writeFile(temporary, JSON.stringify(next, null, 2) + '\n', { flag: 'wx', mode: 0o600 }); await rename(temporary, file); }
       finally { await unlink(temporary).catch(() => {}); }

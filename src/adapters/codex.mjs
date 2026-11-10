@@ -120,8 +120,8 @@ async function readSessions({ codexHome, id } = {}) {
       if (!columns.has('source')) warnings.push(`Codex history schema in ${entry.name} cannot identify user conversations; unverified rows are hidden.`);
       const selected = ['id', 'name', 'title', 'cwd', 'updated_at_ms', 'updated_at', 'created_at_ms', 'created_at', 'source', 'thread_source', 'agent_role', 'agent_path']
         .filter((column) => columns.has(column));
-      database.function('coop_directory_allowed', { deterministic: true }, cwd => policy.permits(plainDirectory(cwd || '')) ? 1 : 0);
-      const statement = database.prepare(`SELECT ${selected.map((column) => `"${column}"`).join(', ')} FROM threads WHERE coop_directory_allowed(cwd)=1${id == null ? '' : ' AND id = ?'}`);
+      database.function('plexus_directory_allowed', { deterministic: true }, cwd => policy.permits(plainDirectory(cwd || '')) ? 1 : 0);
+      const statement = database.prepare(`SELECT ${selected.map((column) => `"${column}"`).join(', ')} FROM threads WHERE plexus_directory_allowed(cwd)=1${id == null ? '' : ' AND id = ?'}`);
       const rows = id == null ? statement.all() : statement.all(id);
       return { sessions: rows.filter((row) => policy.permits(plainDirectory(row.cwd || '')) && typeof row.id === 'string' && row.id && isUserSession(row)).map(toSession), warnings: [...warnings, LIVE_STATUS_WARNING] };
     } catch {
@@ -276,7 +276,7 @@ export async function probeCodexBridge(context = {}) {
   const bridge = startBridge({ nodePath: context.nodePath ?? process.env.CODEX_MCP_NODE_PATH ?? process.execPath,
     bridgePath, pipePath, handshakeTimeoutMs: context.handshakeTimeoutMs ?? 3000 });
   try {
-    await bridge.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'cooperation', version: '0.2.0' } });
+    await bridge.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'plexus', version: '0.3.0' } });
     bridge.notify('notifications/initialized');
     const catalog = await bridge.request('tools/list', {});
     if (!catalog.tools?.some(tool => tool.name === 'send_message_to_thread' || tool.name?.endsWith('__send_message_to_thread')))
@@ -294,7 +294,7 @@ export async function readCodexUsageLimits(context = {}) {
   const bridge = startBridge({ nodePath: context.nodePath ?? process.env.CODEX_MCP_NODE_PATH ?? process.execPath,
     bridgePath, pipePath, handshakeTimeoutMs: context.handshakeTimeoutMs ?? 3000, requestTimeoutMs: context.requestTimeoutMs ?? 15000 });
   try {
-    await bridge.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'cooperation', version: '0.2.0' } });
+    await bridge.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'plexus', version: '0.3.0' } });
     bridge.notify('notifications/initialized');
     const catalog = await bridge.request('tools/list', {});
     const tool = catalog.tools?.find(t => t.name === 'get_usage_limits' || t.name?.endsWith('__get_usage_limits'));
@@ -334,7 +334,7 @@ export async function sendCodexMessage({ targetId, text, context = {} } = {}) {
     await bridge.request('initialize', {
       protocolVersion: '2025-06-18',
       capabilities: {},
-      clientInfo: { name: 'cooperation', version: '0.1.0' },
+      clientInfo: { name: 'plexus', version: '0.1.0' },
     });
     bridge.notify('notifications/initialized');
     const catalog = await bridge.request('tools/list', {});

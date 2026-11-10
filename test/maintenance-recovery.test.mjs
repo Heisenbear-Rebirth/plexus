@@ -59,7 +59,7 @@ test('Codex reconnect evidence requires a completed native head, and a final com
 test('Claude evidence joins original request audit to native compact boundary and rejects later input or damaged history',async t=>{
   const root=await mkdtemp(join(resolve('.'),'.recovery-evidence-test-'));t.after(async()=>{assert.ok(root.startsWith(resolve('.')+sep));await rm(root,{recursive:true,force:true})});
   const configDir=join(root,'claude'),folder=join(configDir,'projects',root.replace(/[^a-zA-Z0-9]/g,'-'));
-  await mkdir(folder,{recursive:true});const file=join(folder,id+'.jsonl'),auditFolder=join(root,'.cooperation','claude-wrapper');await mkdir(auditFolder,{recursive:true});
+  await mkdir(folder,{recursive:true});const file=join(folder,id+'.jsonl'),auditFolder=join(root,'.plexus','claude-wrapper');await mkdir(auditFolder,{recursive:true});
   const control=randomUUID(),request=randomUUID();
   const c=cycle('compacting',{session:{client:'claude',id,cwd:root},compactDispatched:true,controlTurnId:control,compactIntentAt:at(10),compactResult:{status:'unknown',requestId:request}});
   const history=[{sessionId:id,cwd:root,type:'user',uuid:control,timestamp:at(1),message:{role:'user',content:'private maintenance prompt'}},

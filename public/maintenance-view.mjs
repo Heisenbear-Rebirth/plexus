@@ -85,7 +85,7 @@ export function peerDeliveryView(session) {
       description: cause === 'no-mode-asserted' ? '当前 Claude 会话使用“绕过权限”模式，消息未声明发送方权限模式，被原生接收策略暂存。'
         : cause === 'mode-mismatch' ? '发送方与 Claude 会话的权限模式不一致，消息被原生接收策略暂存。'
         : 'Claude 的跨会话消息接收策略暂存了这条消息，模型尚未收到。',
-      action: '请在 Claude 原会话核对跨会话消息接收设置。当前不是模型正在工作，也不是 Cooperation 的重启接续确认。' };
+      action: '请在 Claude 原会话核对跨会话消息接收设置。当前不是模型正在工作，也不是 Plexus 的重启接续确认。' };
   }
   if (runtime.pendingPeerMessages > 0 && !runtime.busy) return { title: '已连接，等待协作消息接收',
     description: `有 ${runtime.pendingPeerMessages} 条协作消息已提交，但尚未观察到原生接收结果。`,

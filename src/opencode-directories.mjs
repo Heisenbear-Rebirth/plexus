@@ -10,19 +10,19 @@ export async function openCodeDirectoryEnabled(directory, options = {}) {
   const root = options.root || installationRoot;
   const directories = options.directories ?? [root];
   if (!Array.isArray(directories) || directories.some(d => typeof d !== 'string' || !d.trim()))
-    throw new Error('Cooperation directories must be an array of explicit project paths.');
+    throw new Error('Plexus directories must be an array of explicit project paths.');
   if (options.followManagedDirectories !== undefined && typeof options.followManagedDirectories !== 'boolean')
-    throw new Error('Cooperation followManagedDirectories must be a boolean.');
+    throw new Error('Plexus followManagedDirectories must be a boolean.');
   if (directories.some(d => sameDirectory(d, directory))) return true;
   if (options.followManagedDirectories === false) return false;
   try {
-    const connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8'));
+    const connection = JSON.parse(await readFile(join(root, '.plexus', 'connection.json'), 'utf8'));
     const endpoint = localEndpoint(connection.url), signal = AbortSignal.timeout(2000);
     const headers = { Authorization: 'Bearer ' + connection.token };
     const status = await fetch(endpoint + '/api/service/status', { headers, signal, redirect: 'error' });
     if (!status.ok) return false;
     const service = await status.json();
-    if (service.service !== 'cooperation' || service.closing || !sameDirectory(service.root, root)) return false;
+    if (service.service !== 'plexus' || service.closing || !sameDirectory(service.root, root)) return false;
     const response = await fetch(endpoint + '/api/directories', { headers, signal, redirect: 'error' });
     if (!response.ok) return false;
     const data = await response.json();

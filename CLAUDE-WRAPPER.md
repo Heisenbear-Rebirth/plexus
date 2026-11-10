@@ -19,12 +19,12 @@
 此步骤会影响 VS Code 用户以后启动 Claude 的路径，应由用户明确选择是否启用。在 VS Code 设置中填写自己生成的 launcher 路径，例如：
 
 ```json
-"claudeCode.claudeProcessWrapper": "E:\\Projects\\Cooperation\\bin\\claude-wrapper.exe"
+"claudeCode.claudeProcessWrapper": "C:\\Tools\\Plexus\\bin\\claude-wrapper.exe"
 ```
 
 完整格式见 [示例](examples/claude-wrapper.vscode-settings.json)。不要用片段覆盖整个设置文件。Windows 普通 VS Code 的用户设置通常位于 `%APPDATA%/Code/User/settings.json`；其他发行版和配置文件位置可能不同。
 
-在管理页为项目勾选“Claude 控制”。同时勾选“包含子目录”后，接入覆盖项目及其子目录；取消勾选会撤回继承，单独设置过的子项目按更具体的设置处理。配置保存在本项目 `.cooperation/claude-wrapper/config.json`，启动管理服务时会同步已有项目的目录范围。未接入的已有进程需要正常重开一次以加载 wrapper；未允许目录继续原样转发，不提供控制端点。正在维护的会话所需范围不能直接撤回。
+在管理页为项目勾选“Claude 控制”。同时勾选“包含子目录”后，接入覆盖项目及其子目录；取消勾选会撤回继承，单独设置过的子项目按更具体的设置处理。配置保存在本项目 `.plexus/claude-wrapper/config.json`，启动管理服务时会同步已有项目的目录范围。未接入的已有进程需要正常重开一次以加载 wrapper；未允许目录继续原样转发，不提供控制端点。正在维护的会话所需范围不能直接撤回。
 
 `directoryScopes` 保存启用与递归范围；`directories` 由同一规则生成，兼容已经打开的旧接入进程。范围变更会同时更新两者，避免旧进程保留已撤回的控制权限。
 
@@ -33,21 +33,21 @@
 ## 使用
 
 ```powershell
-node bin/coop-runtime.mjs status --to claude:SESSION_ID
-node bin/coop-runtime.mjs context --to claude:SESSION_ID
+node bin/plexus-runtime.mjs status --to claude:SESSION_ID
+node bin/plexus-runtime.mjs context --to claude:SESSION_ID
 ```
 
 独立手动压缩会实际改变目标上下文，仅在已选定的空闲目标上执行：
 
 ```powershell
-node bin/coop-compact.mjs --to claude:SESSION_ID
+node bin/plexus-compact.mjs --to claude:SESSION_ID
 ```
 
 日常自动维护可从管理页启用，每个会话独立配置阈值。初始化中、权限待答、半行输入或已有控制操作时，压缩请求会被拒绝。结果不确定不会自动重发。
 
 ## 回执权限
 
-MCP 仅提供 `send_message` 与 `context_checkpoint`。未配置 MCP 时，维护提示会给出专用 `bin/coop-checkpoint.mjs` 命令。这个入口只回传结构化阶段确认，不接受任意发送者 ID、不启动服务、不发送普通协作消息。
+MCP 仅提供 `send_message` 与 `context_checkpoint`。未配置 MCP 时，维护提示会给出专用 `bin/plexus-checkpoint.mjs` 命令。这个入口只回传结构化阶段确认，不接受任意发送者 ID、不启动服务、不发送普通协作消息。
 
 Claude 可能要求用户批准该命令。可采用项目范围的窄 allow 规则，具体路径和授权由用户决定；不需要切换默认权限模式。配置提案脚本只在明确调用 prepare/apply/restore 时执行，操作前应检查目标与预览。
 
@@ -71,16 +71,16 @@ Claude 可能要求用户批准该命令。可采用项目范围的窄 allow 规
 
 ## 统一的可见消息发送
 
-Cooperation 的 CLI、MCP 和管理页普通消息共同进入 `ClaudeRuntime.sendMessage`。普通消息使用 peer 通道，空闲与忙碌均可投递，保持原有发送方与接收策略；不会自动调用 interrupt。交付、恢复、继续提示也从该入口分派，但保持维护控制轮次和空闲状态校验。原生回显经 wrapper 显示，同一消息 UUID 不重复投递。
+Plexus 的 CLI、MCP 和管理页普通消息共同进入 `ClaudeRuntime.sendMessage`。普通消息使用 peer 通道，空闲与忙碌均可投递，保持原有发送方与接收策略；不会自动调用 interrupt。交付、恢复、继续提示也从该入口分派，但保持维护控制轮次和空闲状态校验。原生回显经 wrapper 显示，同一消息 UUID 不重复投递。
 
 强停压缩的顺序仍是 interrupt → 确认原轮次结束 → 可见交付提示 → handoff 回执且轮次结束 → 原生 compact → 可见恢复提示 → restored 回执且轮次结束 → 按原状态决定是否继续并释放 FIFO。收到 interrupt 的确认本身不等于原轮次已结束。
 
 `peerMessageVisibility` 能力只说明已启用实时显示转换；`peerHistoryVisibility` 说明已显式启用重开后恢复，默认 false。投递结果中的 `visibility.displayConfirmed` 不因传输提交而置为 true。旧 wrapper 可以继续收普通 peer 消息，但结果会说明其显示能力尚未启用，需在工作结束后正常重开。
 
-默认不执行历史补显，也不为补显读取原生 JSONL；`visibilityHistory` 报告 `disabled`、count 为 0。新消息仍按原生回显实时显示。重开后旧协作消息可能不再出现在 Claude 面板中，可在 Cooperation 管理页查看通信历史。这样避免将多条旧消息集中补到对话末尾，让人误以为它们再次发来。
+默认不执行历史补显，也不为补显读取原生 JSONL；`visibilityHistory` 报告 `disabled`、count 为 0。新消息仍按原生回显实时显示。重开后旧协作消息可能不再出现在 Claude 面板中，可在 Plexus 管理页查看通信历史。这样避免将多条旧消息集中补到对话末尾，让人误以为它们再次发来。
 
-如明确需要恢复旧行为，可在项目 wrapper 配置中设置 `peerHistoryVisibility: true`，或在启动环境中设置 `COOP_PEER_HISTORY_VISIBILITY=1`；`COOP_PEER_HISTORY_VISIBILITY=0` 优先关闭。仅显式开启时读取本会话 JSONL，沿当前分支选取最近 200 条 Cooperation peer，在完整行边界向 IDE 补回；不会写原生历史或进入模型输入。恢复消息仍位于末尾，不保证原先的交错位置。未知历史位置、读取失败或同时压缩会跳过恢复并报告原因。
+如明确需要恢复旧行为，可在项目 wrapper 配置中设置 `peerHistoryVisibility: true`，或在启动环境中设置 `PLEXUS_PEER_HISTORY_VISIBILITY=1`；`PLEXUS_PEER_HISTORY_VISIBILITY=0` 优先关闭。仅显式开启时读取本会话 JSONL，沿当前分支选取最近 200 条 Plexus peer，在完整行边界向 IDE 补回；不会写原生历史或进入模型输入。恢复消息仍位于末尾，不保证原先的交错位置。未知历史位置、读取失败或同时压缩会跳过恢复并报告原因。
 
 实时回放与历史补显共用按会话 ID 和消息 UUID 去重的记录，两种到达顺序都只输出一次，不依赖面板再次去重。配置及代码变更在 wrapper 下次正常启动时生效，不热更新或重启正在工作的客户端。
 
-关闭 `COOP_PEER_MESSAGE_VISIBILITY=0` 或项目 wrapper 配置 `peerMessageVisibility: false` 会同时关闭实时转换与历史恢复，在下次启动时生效。原生启动参数、权限和模型设置仍原样传递。
+关闭 `PLEXUS_PEER_MESSAGE_VISIBILITY=0` 或项目 wrapper 配置 `peerMessageVisibility: false` 会同时关闭实时转换与历史恢复，在下次启动时生效。原生启动参数、权限和模型设置仍原样传递。

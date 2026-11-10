@@ -8,7 +8,7 @@ const { pathToFileURL } = require('node:url');
 let shutdown;
 exports.activate = async function(context) {
   const root = path.resolve(__dirname, '../..');
-  if (existsSync(path.join(root,'session-lifecycle-cancelled.json')) || existsSync(path.join(root,'.cooperation/session-lifecycle-cancelled.json'))) return;
+  if (existsSync(path.join(root,'session-lifecycle-cancelled.json')) || existsSync(path.join(root,'.plexus/session-lifecycle-cancelled.json'))) return;
   const { sameDirectory, listenOpenCodeBridge } = await import(pathToFileURL(path.join(root,'src/opencode-bridge.mjs')).href);
   const { readAccessPolicy } = await import(pathToFileURL(path.join(root,'src/access-policy.mjs')).href);
   if (!vscode.workspace.workspaceFolders?.length && context.extensionMode === vscode.ExtensionMode.Development && (await readAccessPolicy()).permits(root)) {
@@ -21,19 +21,19 @@ exports.activate = async function(context) {
   const wrapper = vscode.workspace.getConfiguration('claudeCode').get('claudeProcessWrapper');
   if (typeof wrapper !== 'string' || !sameDirectory(wrapper,path.join(root,'bin/claude-wrapper.exe'))) return;
   const instanceId=randomUUID(), token=randomBytes(32).toString('hex');
-  const previous=process.env.COOP_NATIVE_UI_INSTANCE_ID;
-  process.env.COOP_NATIVE_UI_INSTANCE_ID=instanceId;
+  const previous=process.env.PLEXUS_NATIVE_UI_INSTANCE_ID;
+  process.env.PLEXUS_NATIVE_UI_INSTANCE_ID=instanceId;
   await native.activate();
-  const folder=path.join(root,'.cooperation/native-ui'),instances=path.join(folder,'instances'),operations=path.join(folder,'operations');
+  const folder=path.join(root,'.plexus/native-ui'),instances=path.join(folder,'instances'),operations=path.join(folder,'operations');
   await fs.mkdir(instances,{recursive:true});await fs.mkdir(operations,{recursive:true});
   const pending=new Map();
   const json=(response,status,value)=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});response.end(JSON.stringify(value));};
   async function match(operationId,id){
     const candidates=[];
-    for(const name of await fs.readdir(path.join(root,'.cooperation/claude-wrapper/instances')).catch(()=>[])) {
+    for(const name of await fs.readdir(path.join(root,'.plexus/claude-wrapper/instances')).catch(()=>[])) {
       if(!name.endsWith('.json'))continue;
       try{
-        const record=JSON.parse(await fs.readFile(path.join(root,'.cooperation/claude-wrapper/instances',name),'utf8'));
+        const record=JSON.parse(await fs.readFile(path.join(root,'.plexus/claude-wrapper/instances',name),'utf8'));
         if(!sameDirectory(record.cwd,root)||record.nativeUiInstanceId!==instanceId||!record.sessionId||operationId&&record.nativeLifecycleOperationId!==operationId||id&&record.sessionId!==id)continue;
         const url=new URL(record.endpoint);if(url.hostname!=='127.0.0.1'||url.protocol!=='http:')continue;
         const response=await fetch(new URL('/status',url),{headers:{Authorization:'Bearer '+record.token},signal:AbortSignal.timeout(2000)});
@@ -85,7 +85,7 @@ exports.activate = async function(context) {
   await listenOpenCodeBridge(server);
   const record={client:'claude',instanceId,token,pid:process.pid,cwd:root,endpoint:'http://127.0.0.1:'+server.address().port,startedAt:new Date().toISOString()};
   const file=path.join(instances,instanceId+'.json');await fs.writeFile(file,JSON.stringify(record),{mode:0o600});
-  shutdown=async()=>{await Promise.allSettled(pending.values());server.closeAllConnections();await new Promise(r=>server.close(r));await fs.unlink(file).catch(()=>{});if(previous===undefined)delete process.env.COOP_NATIVE_UI_INSTANCE_ID;else process.env.COOP_NATIVE_UI_INSTANCE_ID=previous;};
+  shutdown=async()=>{await Promise.allSettled(pending.values());server.closeAllConnections();await new Promise(r=>server.close(r));await fs.unlink(file).catch(()=>{});if(previous===undefined)delete process.env.PLEXUS_NATIVE_UI_INSTANCE_ID;else process.env.PLEXUS_NATIVE_UI_INSTANCE_ID=previous;};
   context.subscriptions.push({dispose:()=>{void shutdown?.();}});
 };
 exports.deactivate=()=>shutdown?.();

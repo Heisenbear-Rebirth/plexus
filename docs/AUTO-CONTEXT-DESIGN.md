@@ -6,7 +6,7 @@
 
 ## 1. 目标与已确定需求
 
-Cooperation 按每个原生会话独立监测上下文、暂停业务、保存交付文档、压缩、恢复上下文和继续任务。保留 Codex 桌面 App 与 Claude Code VS Code 官方面板。多个项目目录的会话可以同时出现在同一个管理页并相互通信。
+Plexus 按每个原生会话独立监测上下文、暂停业务、保存交付文档、压缩、恢复上下文和继续任务。保留 Codex 桌面 App 与 Claude Code VS Code 官方面板。多个项目目录的会话可以同时出现在同一个管理页并相互通信。
 
 每个会话以 `(hostId, client, sessionId)` 唯一标识；本期 hostId 为 local。会话名称、项目目录和界面标签均不作为身份。改名不改变策略，目录改变不隐式复制其他会话的设置。模型、思考强度和权限模式沿用原会话，管理流程不切换它们。
 
@@ -118,11 +118,11 @@ Claude暂停通过wrapper的独立SDK interrupt请求，不代答权限。维护
 
 第二阶段stage为`restored`。发送者由调用环境自动识别，不能自填任意senderId。凭证绑定会话、cycle、阶段、有效租约；只接受当前阶段的期望会话，拒绝其他会话、旧cycle、乱序及阶段混用。重复合法回执返回原结果，不重复推进。
 
-CLI备选：`coop context checkpoint --cycle ... --stage handoff|restored --receipt-token ... --document ...`。现有CLI/MCP身份识别可复用，但Claude祖先进程匹配要覆盖已存在的launcher→node→Claude→tool层级。若权限阻止执行CLI，流程显示等待处理并按原审批机制办理，不改permissions。普通最终回复OK可作为给用户看的文本，状态机只认结构化回执与对应轮次结束。
+CLI备选：`plexus context checkpoint --cycle ... --stage handoff|restored --receipt-token ... --document ...`。现有CLI/MCP身份识别可复用，但Claude祖先进程匹配要覆盖已存在的launcher→node→Claude→tool层级。若权限阻止执行CLI，流程显示等待处理并按原审批机制办理，不改permissions。普通最终回复OK可作为给用户看的文本，状态机只认结构化回执与对应轮次结束。
 
 成功第一阶段除回执外，还验证交付文档存在、非空、可读取和属于该会话获准工作目录，保存内容hash与相对路径。服务可把副本存入本项目的maintenance存储。禁止把聊天正文中的任意路径当成已授权文件写入目标。
 
-默认建议文档放在目标会话自己获准的工作目录：`.cooperation/handoffs/<client>/<sessionId>/<cycleId>.md`，由该会话写入。若目标规则不允许该位置，使用其已授权位置或请求用户指定。当前主任务不会据此直接在其他项目写文件。中央配置、队列和副本均留在Cooperation；具体跨目录文件操作要遵守用户及目标会话授权。
+默认建议文档放在目标会话自己获准的工作目录：`.plexus/handoffs/<client>/<sessionId>/<cycleId>.md`，由该会话写入。若目标规则不允许该位置，使用其已授权位置或请求用户指定。当前主任务不会据此直接在其他项目写文件。中央配置、队列和副本均留在Plexus；具体跨目录文件操作要遵守用户及目标会话授权。
 
 ## 6. 提示词模板
 
@@ -146,7 +146,7 @@ soft触发的原本空闲会话不额外发送“继续工作”；排队消息�
 
 ## 7. 消息锁、排队与释放
 
-所有经Cooperation发送的普通消息都必须经过同一个admission入口，包括CLI、MCP和管理服务内部发送路径。由接收会话的锁决定投递或入队。发送方不因对方被锁而阻塞整个工具调用；返回messageId、status=queued、原因与cycleId。先持久化再返回成功。
+所有经Plexus发送的普通消息都必须经过同一个admission入口，包括CLI、MCP和管理服务内部发送路径。由接收会话的锁决定投递或入队。发送方不因对方被锁而阻塞整个工具调用；返回messageId、status=queued、原因与cycleId。先持久化再返回成功。
 
 按接收方分配递增sequence，保存正文、身份名称快照、接收时间和发送者，保证FIFO。锁期间新到消息持续排队。控制提示和checkpoint走单独的窄维护通道，只允许当前cycle，不与普通消息互相等待。
 
@@ -158,7 +158,7 @@ soft触发的原本空闲会话不额外发送“继续工作”；排队消息�
 
 此队列首先覆盖维护期间的消息，不自动把所有普通离线发送改为无限重试。维护中客户端掉线，现有队列保留并等待恢复。
 
-**锁的实际边界：**第一阶段能保证所有Cooperation管理入口的普通消息被排队。用户直接在原生界面输入、其他工具直接调用客户端内部接口，可能绕过服务。Claude可进一步在wrapper处隔离原面板user输入并提示排队；peer inbox仍是另一入口。Codex原生输入锁未验证。遇到可观察的外部输入或用户停止时，进入user_intervened并停止自动推进，保留队列，不能宣称已实现全客户端不可绕过的锁。若用户要求拦截所有来源，需要作为独立能力验收。
+**锁的实际边界：**第一阶段能保证所有Plexus管理入口的普通消息被排队。用户直接在原生界面输入、其他工具直接调用客户端内部接口，可能绕过服务。Claude可进一步在wrapper处隔离原面板user输入并提示排队；peer inbox仍是另一入口。Codex原生输入锁未验证。遇到可观察的外部输入或用户停止时，进入user_intervened并停止自动推进，保留队列，不能宣称已实现全客户端不可绕过的锁。若用户要求拦截所有来源，需要作为独立能力验收。
 
 ## 8. 多目录与管理页
 
@@ -172,11 +172,11 @@ soft触发的原本空闲会话不额外发送“继续工作”；排队消息�
 
 实施默认建议：添加目录先展示会话，由用户逐个或批量启用自动管理；新增会话初始不自动接管。全局默认仅预填阈值。这个选择作为设计假设保留，若用户要求发现即自动纳管，再提供明确开关。
 
-Claude当前wrapper控制端点只在Cooperation目录启用。添加其他目录后需同步明确启用的wrapper目录并让相关Claude会话重开；管理页展示“待重开接入”。wrapper应支持校验后的目录配置刷新，避免把UI能看见会话误当成已具备控制能力。
+Claude当前wrapper控制端点只在Plexus目录启用。添加其他目录后需同步明确启用的wrapper目录并让相关Claude会话重开；管理页展示“待重开接入”。wrapper应支持校验后的目录配置刷新，避免把UI能看见会话误当成已具备控制能力。
 
 ## 9. 存储、恢复与故障
 
-建议使用Node内置SQLite建立`.cooperation/management.sqlite`，使策略、cycle、锁、回执、消息队列和出站意图在一个事务内一致；不增加npm依赖。推荐表：directories、session_policies、runtime_snapshots、maintenance_cycles、checkpoints、messages、outbox、manager_leases、events。
+建议使用Node内置SQLite建立`.plexus/management.sqlite`，使策略、cycle、锁、回执、消息队列和出站意图在一个事务内一致；不增加npm依赖。推荐表：directories、session_policies、runtime_snapshots、maintenance_cycles、checkpoints、messages、outbox、manager_leases、events。
 
 现有messages.jsonl先保留，按消息ID幂等导入后核对数量、正文hash、身份快照与状态。迁移先在副本验证，停旧服务后切换；不同时把两种存储当可写权威源。旧日志保留备份，读取兼容可以逐步下线。session_policies包含enabled、softPercent、hardPercent、usageBasis、policyRevision和创建来源；cycle保存触发数据、wasWorkingAtTrigger、原轮次、模型/权限快照、各阶段时间及nonce摘要。
 

@@ -16,7 +16,7 @@
 
 ## 使用入口
 
-Codex/Claude MCP 新增 `create_session`、`connect_session`。OpenCode 使用 `cooperation_create_session`、`cooperation_connect_session`，来源仍由宿主 `ToolContext` 提供，并经过原生权限询问。
+Codex/Claude MCP 新增 `create_session`、`connect_session`。OpenCode 使用 `plexus_create_session`、`plexus_connect_session`，来源仍由宿主 `ToolContext` 提供，并经过原生权限询问。
 
 创建参数示例：
 
@@ -24,7 +24,7 @@ Codex/Claude MCP 新增 `create_session`、`connect_session`。OpenCode 使用 `
 {
   "requestId": "review-task-20260918-001",
   "client": "opencode",
-  "directory": "C:/Tools/Cooperation",
+  "directory": "C:/Tools/Plexus",
   "title": "本次任务的独立协作会话"
 }
 ```
@@ -34,7 +34,7 @@ Codex/Claude MCP 新增 `create_session`、`connect_session`。OpenCode 使用 `
 ```json
 {
   "requestId": "connect-review-20260918-001",
-  "directory": "C:/Tools/Cooperation",
+  "directory": "C:/Tools/Plexus",
   "to": "opencode:ses_ExampleSessionID"
 }
 ```
@@ -44,15 +44,15 @@ Codex/Claude MCP 新增 `create_session`、`connect_session`。OpenCode 使用 `
 CLI 供可检测身份的 Codex/Claude 工具进程使用：
 
 ```powershell
-node bin/coop.mjs session create --target-client opencode --directory C:/Tools/Cooperation --request-id review-task-20260918-001 --title 审阅任务 --client codex
-node bin/coop.mjs session connect --to opencode:ses_ExampleSessionID --directory C:/Tools/Cooperation --request-id connect-review-20260918-001 --client codex
+node bin/plexus.mjs session create --target-client opencode --directory C:/Tools/Plexus --request-id review-task-20260918-001 --title 审阅任务 --client codex
+node bin/plexus.mjs session connect --to opencode:ses_ExampleSessionID --directory C:/Tools/Plexus --request-id connect-review-20260918-001 --client codex
 ```
 
 管理页沿用原项目布局，在目录项目增加“新建会话”“连接会话”，会话设置也提供连接入口。未实现客户端的新建选项禁用。未知请求的编号及参数保存在页面本地存储，刷新后继续核对同一请求。
 
 ## 授权与设置
 
-- 生命周期目录默认仅为 Cooperation 安装目录。嵌入式 `startServer` 可由宿主显式传入 `lifecycleDirectories`；目录列表、递归发现和自定义分组不会自动扩展该权限。请求同时核对精确路径和 realpath。
+- 生命周期目录默认仅为 Plexus 安装目录。嵌入式 `startServer` 可由宿主显式传入 `lifecycleDirectories`；目录列表、递归发现和自定义分组不会自动扩展该权限。请求同时核对精确路径和 realpath。
 - agent 来源必须处于同一获准目录；OpenCode 校验一次性身份凭据、原生 messageID、实例、目录，工具不接受自填 `from`。管理页用 CSRF，共享 CLI/MCP 拒绝 OpenCode 伪造身份。
 - 来源或连接目标处于维护流程时拒绝操作；新会话不自动开启维护、不自动加入分组、不自动发送任务。
 - OpenCode 新会话不带 `parentID`。原生模型/agent 默认遵循项目设置；同端来源已有 session model/agent 时继承。权限先设置为逐项 `ask`，再保留同端来源已有的 session 权限规则；不启用跳过权限。
@@ -62,19 +62,19 @@ node bin/coop.mjs session connect --to opencode:ses_ExampleSessionID --directory
 
 SQLite `session_operations` 保存真实来源、参数指纹、requestId、operationId、时间和结果。幂等键由来源身份与 requestId 共同确定；同编号不同参数拒绝，并发相同操作复用一个结果。
 
-外部动作前已持久化 `unknown`。进程退出和响应丢失不会使创建自动重试。OpenCode 插件另在 `.cooperation/opencode/session-operations/` 排他记录意图，并在原生 session metadata 保存 `cooperationOperationId`。重复请求通过已知原生 ID 或原生 metadata 只读核对；无证据时仍保持 `unknown`。不要换新 requestId 来重试未知创建。
+外部动作前已持久化 `unknown`。进程退出和响应丢失不会使创建自动重试。OpenCode 插件另在 `.plexus/opencode/session-operations/` 排他记录意图，并在原生 session metadata 保存 `plexusOperationId`（更名前创建的会话为 `cooperationOperationId`，仍可核对）。重复请求通过已知原生 ID 或原生 metadata 只读核对；无证据时仍保持 `unknown`。不要换新 requestId 来重试未知创建。
 
 ## OpenCode 上下文占用修复
 
 旧实现同时在桥接层固定返回 `usage: null`、runtime.context 返回空统计、监控器跳过 OpenCode，造成界面持续显示未知。新实现读取最近 100 条原生消息中的最新有效 assistant 单次回复统计，优先使用该回复 `tokens.total`；无 total 时合计 input、output、reasoning、cache.read、cache.write。不会使用 session 累计消费。
 
-容量取回复对应 provider/model 的 `limit.context`，只保留模型 ID 与容量，不保存或输出 provider 凭据。空会话、全零流式占位和不完整统计保持未知；后续消息、模型切换、回滚或压缩摘要标记统计已有变化。页面展示百分比、tokens、模型、统计时间及变化提示。Cooperation 自动维护继续关闭。
+容量取回复对应 provider/model 的 `limit.context`，只保留模型 ID 与容量，不保存或输出 provider 凭据。空会话、全零流式占位和不完整统计保持未知；后续消息、模型切换、回滚或压缩摘要标记统计已有变化。页面展示百分比、tokens、模型、统计时间及变化提示。Plexus 自动维护继续关闭。
 
 ## 本次验证和部署状态
 
 - 自动测试覆盖工具目录、用量口径、监控持久化、身份/CSRF/目录拒绝、维护阻挡、并发幂等、参数冲突、manager/plugin 重启后核对和无证据不重建。
-- OpenCode 1.18.30 隔离原生后端：独立创建、原生 metadata/权限、重复请求同 ID、连接同 ID、测试后端重开后保留与核对均通过；没有模型调用。真实历史测试会话测得 3,962 / 1,000,000 tokens，0.4%。证据 `.cooperation/opencode/lifecycle-validation-result.json`。
-- 隔离 Chrome：上下文显示、未知创建刷新后继续核对且只创建一次、连接保持原 ID 均通过；无页面错误，奶白背景保留。证据 `.cooperation/lifecycle-ui-result.json`。
+- OpenCode 1.18.30 隔离原生后端：独立创建、原生 metadata/权限、重复请求同 ID、连接同 ID、测试后端重开后保留与核对均通过；没有模型调用。真实历史测试会话测得 3,962 / 1,000,000 tokens，0.4%。证据 `.plexus/opencode/lifecycle-validation-result.json`。
+- 隔离 Chrome：上下文显示、未知创建刷新后继续核对且只创建一次、连接保持原 ID 均通过；无页面错误，奶白背景保留。证据 `.plexus/lifecycle-ui-result.json`。
 - 本轮新增工具尚未在真实原生模型轮次中完成“发起创建→收到返回地址→新会话回信”的全链验收；已有双向消息验收不能替代该项。
 - **真实 manager 和正在工作的 OpenCode 插件未重启，仍使用已加载的旧代码。** 升级需在安全窗口加载新版 manager/插件；真实库仍含受保护目录策略，不可直接执行普通启动脚本恢复它们。
 
@@ -88,7 +88,7 @@ Claude 原生 `/open?session=...` URI 会打开面板，不能精确证明它在
 
 ### 授权后的接口核对与宿主状态
 
-2026-09-18T07:55:57Z，只读本项目 wrapper 注册并请求精确匹配本项目的 `/status`：Claude wrapper protocol2 已连接且空闲。Codex桌面App已在运行，但管理服务报告App Tools桥断开；本项目缓存连接仍是04:16:09Z取得的旧连接。证据 `.cooperation/native-host-readiness.json`。用户需在Codex打开Cooperation已有任务，使已配置MCP取得当前连接；无需手工新建或复制ID。
+2026-09-18T07:55:57Z，只读本项目 wrapper 注册并请求精确匹配本项目的 `/status`：Claude wrapper protocol2 已连接且空闲。Codex桌面App已在运行，但管理服务报告App Tools桥断开；本项目缓存连接仍是04:16:09Z取得的旧连接。证据 `.plexus/native-host-readiness.json`。用户需在Codex打开Plexus已有任务，使已配置MCP取得当前连接；无需手工新建或复制ID。
 
 已限定读取当前已安装Codex **26.911.7940.0** 的app.asar中会话工具代码（只读安装代码，没有执行包内容），发现原生 `create_thread` 的准确实现：
 

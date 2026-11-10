@@ -61,10 +61,10 @@
 - 第一回执验证文档存在、hash及允许路径；第二回执验证恢复阶段。
 - 锁在流程事务创建时获取，普通发送返回queued而不是堵住发送方工具。
 - 队列持久化正文/身份快照/sequence，控制提示走单独通道。
-- 消息router成为所有Cooperation入口的唯一admission点；去除任何绕过锁的内部直发路径。
+- 消息router成为所有Plexus入口的唯一admission点；去除任何绕过锁的内部直发路径。
 - ACK先返回，等控制轮次真正结束再推进，避免MCP回执工具与压缩相互中断。
 
-拟新增 `src/checkpoint-service.mjs`、`src/session-mailbox.mjs`；扩展src/mcp.mjs、bin/coop.mjs和service。MCP工具变化保持最小：send_message + context_checkpoint；不给agent暴露会话发现。
+拟新增 `src/checkpoint-service.mjs`、`src/session-mailbox.mjs`；扩展src/mcp.mjs、bin/plexus.mjs和service。MCP工具变化保持最小：send_message + context_checkpoint；不给agent暴露会话发现。
 
 通过条件：写交付和恢复期间连续发消息全部入队，原文未丢失；第二回执前零投递；不同会话互不阻塞；重复回执不重复压缩或继续；重启后仍保持锁和队列。
 
@@ -90,7 +90,7 @@
 - 恢复时校验lease/fencing、目标instance/turn和原生事件，不自动重放结果不确定的消息或压缩。
 - UI展示needs_attention原因、队列和安全恢复选项；取消流程需明确队列释放/保留结果。
 - 报告完整测试与真实原生验收范围，单独标明仍未验证的并发/重启场景。
-- 文档描述原生UI输入和外部直连可能绕过Cooperation锁，不承诺全系统硬隔离。
+- 文档描述原生UI输入和外部直连可能绕过Plexus锁，不承诺全系统硬隔离。
 
 通过条件：无丢消息、无乱序插队、无误把未知当完成、无恢复后无限压缩；原模型/权限未被服务改写；未纳管会话继续原使用方式。
 
@@ -100,7 +100,7 @@
 
 1. 会话逐个或批量显式纳管，新增目录先发现不自动接管。
 2. 阈值分母为客户端报告的完整有效窗口，而非自动压缩指示器预算。
-3. 锁首先覆盖所有Cooperation入站消息，原生UI直接输入视为用户介入；全来源锁需要额外客户端能力。
+3. 锁首先覆盖所有Plexus入站消息，原生UI直接输入视为用户介入；全来源锁需要额外客户端能力。
 4. wasWorking=true时先发送一次继续工作，再FIFO投递排队消息。
 5. “强制暂停”采用原生中断业务轮次，保留进程、文件和权限状态；不使用操作系统挂起或kill。
 

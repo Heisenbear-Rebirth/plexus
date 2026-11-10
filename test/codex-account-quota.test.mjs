@@ -8,7 +8,7 @@ import { accountQuotaBlocked } from '../src/quota-state.mjs';
 import { ContextMonitor } from '../src/context-monitor.mjs';
 import { MaintenanceController } from '../src/maintenance-controller.mjs';
 import { ManagementStore, sessionKey } from '../src/management-store.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 import { quotaSettingKey } from '../src/quota-recovery.mjs';
 
 test('account observer shares in-flight queries, polls without model calls and replaces failed/stale results with unknown', async () => {
@@ -30,8 +30,8 @@ test('account observer shares in-flight queries, polls without model calls and r
 });
 
 test('idle Codex sessions with exhausted account quota stay observable, hold FIFO and never fabricate an interrupted task', async t => {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'account-quota-'));
-  const store = await new ManagementStore(join(root, '.cooperation')).init();
+  const root = await mkdtemp(join(resolve('.plexus'), 'account-quota-'));
+  const store = await new ManagementStore(join(root, '.plexus')).init();
   const session = { client: 'codex', id: randomUUID(), cwd: root }, sender = { client: 'claude', id: randomUUID(), cwd: root };
   let used = 100, reads = 0, controls = 0, deliveries = 0;
   const observer = new CodexAccountQuota({ read: async () => { reads++; return { rateLimits: { primary: { usedPercent: used } } }; } });
@@ -40,7 +40,7 @@ test('idle Codex sessions with exhausted account quota stay observable, hold FIF
     capabilities: { automaticMaintenance: true, readActivity: true, sendControl: true, compact: true, observeCompletion: true } }),
     sendControl: async () => { controls++; throw Error('Completed task must not be resumed'); },
     compact: async () => { controls++; throw Error('Exhausted account must not be compacted'); }, close() {} });
-  const service = new CooperationService({ root, store, runtimeFactory, adapters: {
+  const service = new PlexusService({ root, store, runtimeFactory, adapters: {
     codex: { find: async () => session, list: async () => ({ sessions: [session] }), send: async () => { deliveries++; return { status: 'submitted' }; } },
     claude: { find: async () => sender, list: async () => ({ sessions: [] }) },
   } });
@@ -50,7 +50,7 @@ test('idle Codex sessions with exhausted account quota stay observable, hold FIF
   const monitor = new ContextMonitor({ store, service, runtimeFactory });
   monitor.readers.set(sessionKey(session), { read: async () => ({ usedTokens: 80, contextWindowTokens: 100 }) });
   const controller = new MaintenanceController({ root, store, service, monitor });
-  t.after(async () => { await controller.close(); await service.mailbox.close(); await observer.close(); store.close(); assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await controller.close(); await service.mailbox.close(); await observer.close(); store.close(); assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   await controller.tick();
   const sample = store.getSnapshot(session); assert.equal(sample.runtime.activity, 'idle'); assert.equal(sample.decision.action, 'wait_quota');
   assert.equal(sample.runtime.quota, undefined); assert.equal(store.getSetting(quotaSettingKey(session)), null);

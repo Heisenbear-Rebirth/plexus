@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { visibleAddresses, messageMatches, autoCompressEnabled, validThresholds, PolicySaver, directoryConnection, connectionGuidance, sessionConnected } from '../public/ui-state.mjs';
 import { ContextMonitor } from '../src/context-monitor.mjs';
 import { ManagementStore } from '../src/management-store.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 import { startServer } from '../src/http-server.mjs';
 const idA='11111111-1111-4111-8111-111111111111',idB='22222222-2222-4222-8222-222222222222';
 test('visible tree leaf union matches sender or recipient, excludes closed groups and deduplicates overlap',()=>{
@@ -45,9 +45,9 @@ test('autosave failure is visible and does not blindly replay queued changes',as
 });
 test('discovered sessions update context without any policy; disabling automatic compression keeps observation running',async t=>{
   const root=await mkdtemp(join(resolve('.'),'.ui-monitor-test-'));
-  const store=await new ManagementStore(join(root,'.cooperation')).init();store.saveDirectory({path:root,normalized:root.toLowerCase()});
+  const store=await new ManagementStore(join(root,'.plexus')).init();store.saveDirectory({path:root,normalized:root.toLowerCase()});
   const session={client:'claude',id:idA,name:'observed',cwd:root};let used=100,calls=0;
-  const service=new CooperationService({store,adapters:{claude:{list:async()=>({sessions:[session],warnings:[]})}}});
+  const service=new PlexusService({store,adapters:{claude:{list:async()=>({sessions:[session],warnings:[]})}}});
   const monitor=new ContextMonitor({store,service,runtimeFactory:()=>({status:async()=>{calls++;return{connected:true,activity:'idle',usage:{usedTokens:used,contextWindowTokens:1000,source:'fixture',measuredAt:new Date().toISOString()}};},close(){}})});
   t.after(async()=>{monitor.close();store.close();await rm(root,{recursive:true,force:true});});
   await monitor.observeAll();assert.equal(store.getSnapshot(session).usage.usedTokens,100);assert.equal(store.getPolicy(session),null);
@@ -68,7 +68,7 @@ test('HTTP autosave maps one checkbox, rejects stale edits and filters messages 
   const server=await startServer({root,port:0,startMonitoring:false,adapters:{claude:{find:async()=>a},codex:{find:async()=>b}}});
   t.after(async()=>{await server.close();await rm(root,{recursive:true,force:true});});
   const config=await(await fetch(server.url+'/api/config')).json();
-  const save=body=>fetch(server.url+'/api/policies',{method:'POST',headers:{'Content-Type':'application/json','X-Coop-UI':config.csrfToken},body:JSON.stringify(body)});
+  const save=body=>fetch(server.url+'/api/policies',{method:'POST',headers:{'Content-Type':'application/json','X-Plexus-UI':config.csrfToken},body:JSON.stringify(body)});
   let response=await save({address:'claude:'+idA,expectedRevision:0,policy:{autoCompress:false,softPercent:51,hardPercent:81}});
   const first=(await response.json()).policy;assert.equal(first.enabled,false);assert.equal(first.mode,'automatic');
   response=await save({address:'claude:'+idA,expectedRevision:0,policy:{autoCompress:true}});assert.equal(response.status,409);assert.equal(server.store.getPolicy(a).enabled,false);
@@ -111,7 +111,7 @@ test('Codex directory readiness distinguishes a missing message bridge from an u
 });
 test('connection help provides everyday actions instead of installation commands and preserves a running Claude task', () => {
   const directory = { id: 'a', path: 'E:/Work/A', recursive: true };
-  const install = "E:/Tools/O'Brien Cooperation";
+  const install = "E:/Tools/O'Brien Plexus";
   const guide = connectionGuidance({ client: 'claude', directory, status: { reason: 'claude_access', connected: 0 }, installationDirectory: install });
   assert.equal(guide.scope, directory.path);
   assert.equal(guide.steps.some(step => step.code), false);

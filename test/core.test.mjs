@@ -5,7 +5,7 @@ import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { parseAddress, displayAddress, messageEnvelope } from '../src/address.mjs';
 import { MessageStore } from '../src/store.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 
 test('copied addresses round trip, including colon and Unicode in the title', () => {
   const session = { client: 'codex', id: '11111111-1111-4111-8111-111111111111', name: '研究: 协作 / α' };
@@ -40,7 +40,7 @@ test('service logs before delivery, adds real sender, and records uncertain fail
   const sender = { client: 'codex', id: 'sender-123', name: '实现者', cwd: directory };
   const recipient = { client: 'claude', id: 'target-123', name: '审查者', cwd: directory };
   let count = 0;
-  const service = new CooperationService({ store, adapters: {
+  const service = new PlexusService({ store, adapters: {
     codex: { find: async () => sender },
     claude: { find: async () => recipient, send: async ({ text }) => {
       count++; assert.equal(store.list().length, 1); assert.equal(store.list()[0].status, 'pending');

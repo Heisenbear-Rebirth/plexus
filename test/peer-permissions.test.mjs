@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { codexPeerPermissionClass, openCodePeerPermissionClass, senderPeerPermissionClass, claudePeerEnvelope } from '../src/peer-permissions.mjs';
 import { projectCodexState } from '../src/runtime/codex-runtime.mjs';
 import { ManagementStore, sessionKey } from '../src/management-store.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 
 test('Codex declares a peer permission class only from a known effective permission selection', () => {
   assert.equal(codexPeerPermissionClass({ approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }), 'bypass');
@@ -53,17 +53,17 @@ test('native socket envelope carries the verified mode while preserving text and
 });
 
 test('queued Claude delivery reads the actual sender at dispatch rather than the recipient or an admission snapshot', async t => {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'peer-mode-'));
-  const store = await new ManagementStore(join(root, '.cooperation')).init();
+  const root = await mkdtemp(join(resolve('.plexus'), 'peer-mode-'));
+  const store = await new ManagementStore(join(root, '.plexus')).init();
   const from = { client: 'codex', id: randomUUID(), cwd: root }, to = { client: 'claude', id: randomUUID(), cwd: root };
   let sourceMode = 'prompting', reads = 0, closed = 0; const sent = [];
-  const service = new CooperationService({ root, store, runtimeFactory: session => {
+  const service = new PlexusService({ root, store, runtimeFactory: session => {
     assert.equal(session.id, from.id, 'must read sender, never recipient');
     return { status: async () => { reads++; return { connected: true, sessionId: from.id, cwd: root, peerPermissionClass: sourceMode }; }, close: () => { closed++; } };
   }, adapters: { codex: { find: async () => from }, claude: { find: async () => to, send: async payload => {
     sent.push({ text: payload.text, mode: await payload.readSenderPermissionClass() }); return { status: 'submitted' };
   } } } });
-  t.after(async () => { await service.mailbox.close(); store.close(); assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await service.mailbox.close(); store.close(); assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   const cycle = store.createCycle({ session: to, state: 'needs_attention' });
   await service.send({ from, to: 'claude:' + to.id, message: 'original payload' });
   assert.equal(reads, 0);

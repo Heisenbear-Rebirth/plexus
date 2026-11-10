@@ -10,7 +10,7 @@ import { PeerMessageVisibility } from '../src/claude-peer-visibility.mjs';
 import { messageEnvelope } from '../src/address.mjs';
 
 async function fixture(t, cleanup = true) {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'prompt-settings-test-'));
+  const root = await mkdtemp(join(resolve('.plexus'), 'prompt-settings-test-'));
   if (cleanup) t.after(() => rm(root, { recursive: true, force: true })); return root;
 }
 test('prompt settings validate required receipts, literal substitutions, field bounds and concurrent revisions', async t => {
@@ -39,11 +39,11 @@ test('HTTP prompt editing requires CSRF, survives reload, previews only examples
   t.after(async () => { await manager.close(); await rm(root, { recursive: true, force: true }); });
   const config = await (await fetch(manager.url + '/api/config')).json();
   const initial = await (await fetch(manager.url + '/api/prompt-settings')).json();
-  assert.equal(initial.revision, 0); assert.match(initial.samples.opencode.handoffCheckpoint, /cooperation_context_checkpoint/);
+  assert.equal(initial.revision, 0); assert.match(initial.samples.opencode.handoffCheckpoint, /plexus_context_checkpoint/);
   assert.match(initial.samples.claude.restoreCheckpoint, /运行时生成/);
   const values = structuredClone(initial.values);
   for (const client of ['codex','claude','opencode']) { values.messages[client].prefix = client + ' prefix'; values.messages[client].suffix = client + ' suffix'; }
-  const post = (body, csrf = config.csrfToken) => fetch(manager.url + '/api/prompt-settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Coop-UI': csrf }, body: JSON.stringify(body) });
+  const post = (body, csrf = config.csrfToken) => fetch(manager.url + '/api/prompt-settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Plexus-UI': csrf }, body: JSON.stringify(body) });
   assert.equal((await post({ values, expectedRevision: 0 }, 'wrong')).status, 403);
   assert.equal((await post({ values, expectedRevision: 0 })).status, 200);
   assert.equal((await post({ values, expectedRevision: 0 })).status, 409);

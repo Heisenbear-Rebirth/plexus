@@ -5,8 +5,8 @@ import { join } from 'node:path';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const target = join(root, '.claude', 'settings.local.json');
-const folder = join(root, '.cooperation', 'proposals', 'checkpoint-permission');
-const rule = `Bash(node ${join(root, 'bin', 'coop-checkpoint.mjs').replaceAll('\\', '/')} *)`;
+const folder = join(root, '.plexus', 'proposals', 'checkpoint-permission');
+const rule = `Bash(node ${join(root, 'bin', 'plexus-checkpoint.mjs').replaceAll('\\', '/')} *)`;
 const sha = value => createHash('sha256').update(value).digest('hex');
 const mode = process.argv[2];
 if (!['prepare', 'apply', 'restore'].includes(mode)) throw new Error('Use prepare|apply|restore. Apply only after explicit user approval.');
@@ -29,7 +29,7 @@ if (mode === 'prepare') {
   if (sha(current) !== expected) throw new Error('Project settings changed after preparation; refusing to overwrite.');
   const contents = await readFile(join(folder, mode === 'apply' ? 'proposed-settings.local.json' : 'original.json'), 'utf8');
   if (sha(contents) !== (mode === 'apply' ? manifest.proposedHash : manifest.originalHash)) throw new Error('Proposal backup hash mismatch.');
-  await writeFile(target + '.cooperation-tmp', contents); await rename(target + '.cooperation-tmp', target);
+  await writeFile(target + '.plexus-tmp', contents); await rename(target + '.plexus-tmp', target);
   if (sha(await readFile(target, 'utf8')) !== sha(contents)) throw new Error('Settings verification failed.');
   console.log(JSON.stringify({ status: mode === 'apply' ? 'applied' : 'restored', target, rule, hash: sha(contents) }, null, 2));
 }

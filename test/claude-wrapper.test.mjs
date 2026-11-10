@@ -29,7 +29,7 @@ async function harness(t, extraArgs = [], prepare) {
   const id = randomUUID();
   const prepared = await prepare?.({ directory, id });
   const processHandle = spawn(launcher, [process.execPath, fixture, '--input-format', 'stream-json', '--output-format', 'stream-json', '--resume', id, ...extraArgs], {
-    cwd: directory, env: { ...process.env, COOP_WRAPPER_DATA_DIRECTORY: directory, ...prepared?.env }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: directory, env: { ...process.env, PLEXUS_WRAPPER_DATA_DIRECTORY: directory, ...prepared?.env }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
   });
   const messages = [], stderr = [];
   const exited = new Promise(resolve => processHandle.once('close', code => resolve(code)));
@@ -183,7 +183,7 @@ test('real wrapper applies the cross-mode switch to its own Claude flag layer, r
   assert.deepEqual([applied.peerInbound.mode, applied.peerInbound.effective, applied.peerInbound.decidedBy], ['accept', 'accept', 'flagSettings']);
   assert.deepEqual(h.messages.filter(m => m.type === 'fixture_flag_settings').map(m => m.settings), [{ crossSessionInbound: 'accept' }]);
   assert.doesNotMatch(JSON.stringify(applied), /PRIVATE_FIXTURE_TOKEN|must-not-leave/);
-  assert.equal(h.messages.some(m => m.type === 'control_response' && String(m.response?.request_id).startsWith('cooperation-')), false, 'wrapper replies never reach the IDE');
+  assert.equal(h.messages.some(m => m.type === 'control_response' && String(m.response?.request_id).startsWith('plexus-')), false, 'wrapper replies never reach the IDE');
   await crossModeConfig(h.directory, false);
   const cleared = await until(async () => { const s = (await h.status()).state; return s.peerInbound?.mode === 'default' && s.peerInbound.verifiedAt && s; }, 'cross-mode accept cleared');
   assert.equal(cleared.peerInbound.effective, null);
@@ -191,10 +191,10 @@ test('real wrapper applies the cross-mode switch to its own Claude flag layer, r
 });
 
 test('a managed crossSessionInbound setting overriding the switch is reported, and a rejected apply is not retried on every poll', async t => {
-  const managed = await harness(t, [], async ({ directory }) => { await crossModeConfig(directory, true); return { env: { COOP_FIXTURE_POLICY_INBOUND: 'hold' } }; });
+  const managed = await harness(t, [], async ({ directory }) => { await crossModeConfig(directory, true); return { env: { PLEXUS_FIXTURE_POLICY_INBOUND: 'hold' } }; });
   const overridden = await until(async () => { const s = (await managed.status()).state; return s.peerInbound?.verifiedAt && s; }, 'managed override observed');
   assert.deepEqual([overridden.peerInbound.mode, overridden.peerInbound.effective, overridden.peerInbound.decidedBy], ['accept', 'hold', 'policySettings']);
-  const rejected = await harness(t, [], async ({ directory }) => { await crossModeConfig(directory, true); return { env: { COOP_FIXTURE_REJECT_FLAGS: '1' } }; });
+  const rejected = await harness(t, [], async ({ directory }) => { await crossModeConfig(directory, true); return { env: { PLEXUS_FIXTURE_REJECT_FLAGS: '1' } }; });
   const failed = await until(async () => { const s = (await rejected.status()).state; return s.peerInbound?.state === 'failed' && s; }, 'rejected apply observed');
   for (let i = 0; i < 5; i++) await rejected.status();
   assert.equal(failed.peerInbound.mode, 'default');
@@ -281,7 +281,7 @@ test('native context query stays read-only and its reply does not enter the IDE 
   const response = await fetch(record.endpoint + '/context?sessionId=' + h.id, { headers: { Authorization: `Bearer ${record.token}` } });
   const result = await response.json(); assert.equal(response.status, 200); assert.equal(result.usage.usedPercent, 15);
   assert.equal(JSON.stringify(result).includes('not-returned'), false);
-  assert.equal(h.messages.some(message => message.response?.request_id?.startsWith('cooperation-context-')), false);
+  assert.equal(h.messages.some(message => message.response?.request_id?.startsWith('plexus-context-')), false);
   assert.equal((await h.status()).state.canCompact, true);
   h.send({ type: 'user', session_id: h.id, message: { role: 'user', content: 'after-context-query' } });
   await until(() => h.messages.some(message => message.fixtureReceivedExactly), 'normal input after context query');
@@ -298,7 +298,7 @@ test('quota-limited native wrapper blocks compact and ordinary prompts, queries 
   const quota = await runtime.quota(); assert.equal(quota.status, 'available');
   assert.equal(JSON.stringify(quota).includes('not-returned'), false);
   assert.ok(h.messages.some(m => m.type === 'fixture_quota_request' && m.skipBehaviors === true));
-  assert.equal(h.messages.some(m => m.response?.request_id?.startsWith('cooperation-context-')), false);
+  assert.equal(h.messages.some(m => m.response?.request_id?.startsWith('plexus-context-')), false);
   const requestId = randomUUID(), sent = await runtime.resumeQuota('continue', limited, { requestId, quota });
   assert.equal(sent.status, 'submitted');
   await until(async () => (await runtime.status()).lastCompletedTurnId === requestId, 'continued turn finished');
@@ -373,7 +373,7 @@ test('external prompt, passive busy usage, exact interrupt and same-process resu
   assert.equal((await h.status()).state.activity, 'running');
   const interrupted = await h.control('interrupt'); assert.equal(interrupted.body.status, 'acknowledged');
   await until(async () => (await h.status()).state.activity === 'idle', 'original result confirms idle');
-  assert.equal(h.messages.some(m => m.response?.request_id?.startsWith('cooperation-interrupt-')), false);
+  assert.equal(h.messages.some(m => m.response?.request_id?.startsWith('plexus-interrupt-')), false);
   const resumed = await h.control('prompt', { text: 'resumed' }); assert.equal(resumed.body.status, 'submitted');
   await until(async () => (await h.status()).state.lastControl?.requestId === resumed.request.requestId, 'control prompt completed');
   const after = (await h.status()).state; assert.equal(after.lastControl.status, 'completed');
@@ -391,7 +391,7 @@ test('a session already working before any idle query learns its window from one
   assert.equal(working.usage.contextWindowTokens, 200000); assert.equal(working.usage.usedPercent, 60.03);
   for (let i = 0; i < 3; i++) await h.status();
   assert.deepEqual(h.messages.filter(m => m.type === 'fixture_context_request').map(m => m.detail), ['summary'], 'one local summary read, no token-count calls');
-  assert.equal(h.messages.some(m => m.type === 'control_response' && String(m.response?.request_id).startsWith('cooperation-')), false);
+  assert.equal(h.messages.some(m => m.type === 'control_response' && String(m.response?.request_id).startsWith('plexus-')), false);
 });
 
 test('permission interruption cancels the native request without answering it', { skip: process.platform !== 'win32' }, async t => {
@@ -455,7 +455,7 @@ test('real wrapper and manager accept long-running handoff plus synthetic notice
     const adapters = Object.fromEntries(['codex', 'claude', 'opencode'].map(client => [client, { list: async () => ({ sessions: client === 'claude' ? [target] : [] }), find: async value => value === id ? target : null }]));
     manager = await startServer({ root: directory, port: 0, startMonitoring: false, adapters,
       runtimeFactory: () => new ClaudeRuntime(id, { folder: join(directory, 'instances') }) });
-    return { env: { COOP_FIXTURE_MANAGER_PATH: join(directory, '.cooperation', 'connection.json') }, close: () => manager.close() };
+    return { env: { PLEXUS_FIXTURE_MANAGER_PATH: join(directory, '.plexus', 'connection.json') }, close: () => manager.close() };
   });
   const original = (await h.status()).state;
   const policy = manager.store.savePolicy(target, { enabled: true, mode: 'automatic' });
@@ -497,7 +497,7 @@ test('Codex peer wakes a quota-limited Claude; later messages stay queued and co
     };
     manager = await startServer({ root: directory, port: 0, startMonitoring: false, adapters, runtimeFactory: makeRuntime });
     await writeFile(join(directory, 'quota-utilization.json'), JSON.stringify({ value: 100 }));
-    return { env: { COOP_FIXTURE_MANAGER_PATH: join(directory, '.cooperation', 'connection.json') }, close: () => manager.close() };
+    return { env: { PLEXUS_FIXTURE_MANAGER_PATH: join(directory, '.plexus', 'connection.json') }, close: () => manager.close() };
   });
   nativeInput = h.send;
   const before = (await h.status()).state;

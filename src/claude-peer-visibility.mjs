@@ -4,7 +4,7 @@ const ENVELOPE = /^发送方：(codex|claude|opencode):\/\/[^\r\n]+:([a-zA-Z0-9_
 // A program calling a session interface has no reply address (see messageEnvelope).
 const EXTERNAL = /^发送方：外部程序「[^\r\n]*」（会话接口 [0-9a-f]{16}）\r?\n说明：[^\r\n]*\r?\n消息编号：([0-9a-f-]{36})\r?\n\r?\n/gm;
 
-export function visiblePeerMessage(message, sessionId, label = '【Cooperation 会话消息】') {
+export function visiblePeerMessage(message, sessionId, label = '【Plexus 会话消息】') {
   if (!UUID.test(sessionId || '') || message?.session_id?.toLowerCase?.() !== sessionId.toLowerCase()
     || message.type !== 'user' || message.isReplay !== true || message.parent_tool_use_id != null
     || message.origin?.kind !== 'peer' || !UUID.test(message.uuid || '') || message.message?.role !== 'user') return message;
@@ -28,7 +28,7 @@ export function visiblePeerMessage(message, sessionId, label = '【Cooperation �
 
 // Bounded line framing. Malformed, oversized and incomplete frames pass unchanged.
 export class PeerMessageVisibility {
-  constructor(sessionId, maximum = 1024 * 1024, label = '【Cooperation 会话消息】') {
+  constructor(sessionId, maximum = 1024 * 1024, label = '【Plexus 会话消息】') {
     this.label = label;
     this.sessionId = sessionId; this.maximum = maximum; this.parts = []; this.size = 0; this.passthrough = false; this.seen = new Set(); this.history = [];
   }

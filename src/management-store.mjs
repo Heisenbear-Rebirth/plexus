@@ -216,6 +216,17 @@ export class ManagementStore {
     this.db.prepare('UPDATE cycles SET state=?,data=? WHERE id=?').run(state, json(next), id); this.cycleRevision++;
     this.event('cycle_state', { id, state, revision: next.revision }); return next;
   }
+  // After the data directory moved, an unfinished cycle of a session working in
+  // the installation directory points at its handoff under the new location.
+  relocateActiveHandoffs(from, to) {
+    const same = path => path.replaceAll('\\', '/').toLowerCase();
+    this.transaction(() => {
+      for (const cycle of this.activeCycles()) if (typeof cycle.handoffPath === 'string' && same(cycle.handoffPath).startsWith(same(from) + '/')) {
+        this.db.prepare('UPDATE cycles SET data=? WHERE id=?').run(json({ ...cycle, handoffPath: to + cycle.handoffPath.slice(from.length) }), cycle.id);
+        this.cycleRevision++;
+      }
+    });
+  }
   checkpoint(cycleId, stage) { return parse(this.db.prepare('SELECT data FROM checkpoints WHERE cycle_id=? AND stage=?').get(cycleId, stage)); }
   saveCheckpoint(cycleId, stage, receipt) { this.db.prepare('INSERT INTO checkpoints VALUES(?,?,?)').run(cycleId, stage, json(receipt)); this.event('checkpoint', { cycleId, stage, at: receipt.at }); }
   admit(message) {

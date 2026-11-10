@@ -113,7 +113,7 @@ export class OpenCodeMaintenance {
     state.contextEpoch = epoch?.id || 'initial';
     return { state, head };
   }
-  folder(id) { if (!validSession(id)) throw Error('Invalid session'); return join(this.root, '.cooperation/opencode/maintenance', id); }
+  folder(id) { if (!validSession(id)) throw Error('Invalid session'); return join(this.root, '.plexus/opencode/maintenance', id); }
   file(id, requestId) { if (!validOperation(requestId)) throw Error('Invalid operation'); return join(this.folder(id), requestId + '.json'); }
   async load(file) { try { return JSON.parse(await readFile(file, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } }
   async save(file, entry, exclusive = false) {

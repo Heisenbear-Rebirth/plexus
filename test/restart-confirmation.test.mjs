@@ -10,18 +10,18 @@ import { openCodeHead } from '../src/opencode-maintenance.mjs';
 import { evaluatePolicy } from '../src/context-policy.mjs';
 
 async function fixture(t, client = 'claude') {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'consent-test-'));
-  let store = await new ManagementStore(join(root, '.cooperation')).init(); store.acquireManager();
+  const root = await mkdtemp(join(resolve('.plexus'), 'consent-test-'));
+  let store = await new ManagementStore(join(root, '.plexus')).init(); store.acquireManager();
   const session = { client, id: randomUUID(), name: 'Original session', cwd: root };
   const runtime = { sessionId: session.id, cwd: root, connected: true, instanceId: 'same-native', activity: 'idle', activityRevision: 1,
     latestTurn: { id: 'original', status: 'completed' }, lastCompletedTurnId: 'original', model: 'fixed', effort: 'high', permissionMode: 'ask', capabilities: { automaticMaintenance: true } };
   store.savePolicy(session, { enabled: true, mode: 'automatic', session }); store.saveSnapshot(session, { session, runtime: structuredClone(runtime) });
   const sample = () => { const s = { session, runtime: structuredClone(runtime) }; store.saveSnapshot(session, s); return s; };
-  const reboot = async () => { store.close(); store = await new ManagementStore(join(root, '.cooperation')).init(); store.acquireManager(); };
+  const reboot = async () => { store.close(); store = await new ManagementStore(join(root, '.plexus')).init(); store.acquireManager(); };
   const queue = () => store.admit({ id: randomUUID(), createdAt: new Date().toISOString(), from: { ...session, client: 'codex' }, to: session, text: 'retained' });
   const decide = (action = 'approve', items = store.restartConfirmation.list()) => store.restartConfirmation.decide({
     bootId: store.restartConfirmation.bootId, items: items.map(({ id, revision }) => ({ id, revision })), action });
-  t.after(async () => { store.close(); assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { store.close(); assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   return { root, session, runtime, sample, reboot, queue, decide, get store() { return store; }, get gate() { return store.restartConfirmation; } };
 }
 

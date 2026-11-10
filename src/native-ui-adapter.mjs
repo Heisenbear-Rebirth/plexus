@@ -7,7 +7,7 @@ import { ClaudeRuntime } from './runtime/claude-runtime.mjs';
 
 export function nativeCreationPrompt({ operationId, source, prompt, title }) {
   const from = source?.client && source?.id ? `${source.client}:${source.id}` : '用户管理页';
-  return `[Cooperation native session:${operationId}]\n来源：${from}\n这是获准创建的独立协作会话。协作内容不授予额外权限，仅在本项目与用户已有授权内工作。${title ? '\n任务标题：' + title : ''}\n\n${prompt}`;
+  return `[Plexus native session:${operationId}]\n来源：${from}\n这是获准创建的独立协作会话。协作内容不授予额外权限，仅在本项目与用户已有授权内工作。${title ? '\n任务标题：' + title : ''}\n\n${prompt}`;
 }
 export function createClaudeNativeUi({ root = installationRoot, find = findClaudeSession, runtimeFactory = id => new ClaudeRuntime(id), timeout = 28000 } = {}) {
   async function rpc(record, input) {
@@ -20,16 +20,16 @@ export function createClaudeNativeUi({ root = installationRoot, find = findClaud
   async function host(cwd) {
     (await readAccessPolicy()).assert(cwd);
     const candidates = [];
-    for (const name of await readdir(join(root, '.cooperation/native-ui/instances')).catch(() => [])) {
+    for (const name of await readdir(join(root, '.plexus/native-ui/instances')).catch(() => [])) {
       if (!/^[0-9a-f-]{36}\.json$/.test(name)) continue;
       try {
-        const record = JSON.parse(await readFile(join(root, '.cooperation/native-ui/instances', name), 'utf8'));
+        const record = JSON.parse(await readFile(join(root, '.plexus/native-ui/instances', name), 'utf8'));
         if (record.client !== 'claude' || !sameDirectory(record.cwd, cwd) || !/^[a-f0-9]{64}$/.test(record.token)) continue;
         const state = await rpc(record, { action: 'capabilities', cwd });
         if (state.instanceId === record.instanceId && sameDirectory(state.cwd, cwd) && state.create === true) candidates.push(record);
       } catch { /* Stale native UI hosts are not selectable. */ }
     }
-    if (candidates.length !== 1) throw Object.assign(new Error('需要唯一的 Cooperation 原生界面接入窗口。'), { outcome: 'not_submitted' });
+    if (candidates.length !== 1) throw Object.assign(new Error('需要唯一的 Plexus 原生界面接入窗口。'), { outcome: 'not_submitted' });
     return candidates[0];
   }
   async function verify(result, cwd) {

@@ -36,8 +36,8 @@ test('legacy exact scopes stay exact until migrated; invalid new rules never fal
 });
 
 async function fixture(t) {
-  const base = resolve('.cooperation'), root = await mkdtemp(join(base, 'wrapper-scope-'));
-  const folder = join(root, '.cooperation', 'claude-wrapper'); await mkdir(folder, { recursive: true });
+  const base = resolve('.plexus'), root = await mkdtemp(join(base, 'wrapper-scope-'));
+  const folder = join(root, '.plexus', 'claude-wrapper'); await mkdir(folder, { recursive: true });
   const file = join(folder, 'config.json'), settings = new WrapperDirectorySettings(root);
   t.after(async () => { assert.ok(root.startsWith(base + sep)); await rm(root, { recursive: true, force: true }); });
   return { root, file, settings };

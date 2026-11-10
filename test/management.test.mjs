@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { ManagementStore, sessionKey } from '../src/management-store.mjs';
 import { SessionMailbox } from '../src/session-mailbox.mjs';
 import { evaluatePolicy } from '../src/context-policy.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 
 const project = resolve('.');
 const sender = { client: 'codex', id: 'source-123', cwd: project, name: '原发送者' };
@@ -90,7 +90,7 @@ test('cross-directory message union and overlapping directory discovery deduplic
   const f = await storeFixture(t); const child = join(f.dir, 'child');
   const { mkdir } = await import('node:fs/promises'); await mkdir(child);
   const session = { ...sender, cwd: child, updatedAt: '2026-09-07' };
-  const service = new CooperationService({ store: f.store, adapters: { codex: { list: async () => ({ sessions: [session], warnings: [] }) } } });
+  const service = new PlexusService({ store: f.store, adapters: { codex: { list: async () => ({ sessions: [session], warnings: [] }) } } });
   const result = await service.sessions({ directories: [{ id: 'root', path: f.dir, recursive: true }, { id: 'child', path: child }] });
   assert.equal(result.sessions.length, 1); assert.deepEqual(result.sessions[0].directoryIds, ['root', 'child']);
   f.store.create(record('cross', { ...recipient, cwd: child }));

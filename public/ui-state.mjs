@@ -17,7 +17,7 @@ export function revealPanel(element) {
     reduced ? { opacity: 1 } : { opacity: 1, transform: 'translateY(0)' },
   ], { duration: parseFloat(tokens.getPropertyValue(reduced ? '--motion-fade' : '--motion-panel')) || 180,
     easing: tokens.getPropertyValue('--ease-out').trim() || 'cubic-bezier(0.23, 1, 0.32, 1)' });
-  animation.id = 'cooperation-panel'; panelAnimations.set(element, animation);
+  animation.id = 'plexus-panel'; panelAnimations.set(element, animation);
   animation.finished.catch(() => {}).finally(() => { if (panelAnimations.get(element) === animation) panelAnimations.delete(element); });
 }
 

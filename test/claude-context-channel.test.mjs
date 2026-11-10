@@ -12,7 +12,7 @@ test('more than 32 timed-out reads recover without slot exhaustion, late replies
     request_id: id, subtype: 'success', response: { totalTokens: used, rawMaxTokens: 100 } } }) + '\n'), line => forwarded.push(line));
   for (const request of sent.slice(0, -1)) respond(request.request_id, 99);
   assert.equal(channel.active, true); respond(latest, 10); assert.equal((await current).usedPercent, 10);
-  respond('cooperation-context-some-other-owner-1', 20); assert.equal(forwarded.length, 1); channel.close();
+  respond('plexus-context-some-other-owner-1', 20); assert.equal(forwarded.length, 1); channel.close();
 });
 
 test('a timed-out native interrupt stays blocked until its own late acknowledgment', async () => {
@@ -37,7 +37,7 @@ test('native query response can share chunks with IDE replies and preserves UTF8
 test('a long line in many chunks is forwarded intact, and a reply split across chunks is still withheld', async () => {
   let sent; const channel = new NativeContextChannel(bytes => { sent = JSON.parse(bytes); }, () => true);
   const forwarded = [], forward = part => forwarded.push(Buffer.from(part));
-  const long = Buffer.from(JSON.stringify({ type: 'user', text: 'control_response cooperation- 中'.repeat(100000) }) + '\n');
+  const long = Buffer.from(JSON.stringify({ type: 'user', text: 'control_response plexus- 中'.repeat(100000) }) + '\n');
   for (let index = 0; index < long.length; index += 65536) channel.push(long.subarray(index, index + 65536), forward);
   assert.ok(Buffer.concat(forwarded).equals(long));
   const result = channel.query(); forwarded.length = 0;

@@ -9,16 +9,16 @@ export const lifecycleTools = ['create', 'connect'].map(action => ({ name: actio
   inputSchema: { type: 'object', properties: { requestId: { type: 'string', description: '本次操作的稳定唯一标识，重试时保持不变。' }, directory: { type: 'string' },
     ...(action === 'create' ? { client: { type: 'string', enum: ['codex','claude','opencode'] }, title: { type: 'string' }, prompt: { type: 'string', description: 'Claude/Codex 所需的原生可见首条提示；OpenCode 请创建后通过 send_message 投递。' } } : { to: { type: 'string' } }) },
   required: ['requestId','directory',action === 'create' ? 'client' : 'to'], additionalProperties: false } }));
-export const checkpointTool = { name: 'context_checkpoint', description: '在 Cooperation 指定的上下文维护流程中，确认交付文档已写好或上文已加载。只用于已收到 cycleId 和阶段凭证的维护请求。', inputSchema: {
+export const checkpointTool = { name: 'context_checkpoint', description: '在 Plexus 指定的上下文维护流程中，确认交付文档已写好或上文已加载。只用于已收到 cycleId 和阶段凭证的维护请求。', inputSchema: {
   type: 'object', properties: { cycleId: { type: 'string' }, stage: { type: 'string', enum: ['handoff', 'restored'] }, receiptToken: { type: 'string' }, documentPath: { type: 'string', description: '本会话工作目录内交付文档的绝对路径。' } },
   required: ['cycleId', 'stage', 'receiptToken', 'documentPath'], additionalProperties: false } };
 export const sessionInterfaceTool = { name: 'session_interface', description: '取得本会话的外部接口。外部程序（如 MCP 服务、后台任务）可在完成后用它向本会话发送通知并唤醒会话。返回接口密钥及命令行、HTTP 调用方式；持有密钥即可向本会话发消息，只交给可信程序。', inputSchema: {
   type: 'object', properties: {}, additionalProperties: false } };
 export function startMcp({ root, client } = {}) {
   // OpenCode already exports these names through its native plugin. Its MCP
-  // namespace prefixes `context_checkpoint` with `cooperation_`, replacing the
+  // namespace prefixes `context_checkpoint` with `plexus_`, replacing the
   // native tool and losing ToolContext identity. Never advertise MCP tools to it.
-  let nativeOpenCode = (client || process.env.COOP_CLIENT) === 'opencode';
+  let nativeOpenCode = (client || process.env.PLEXUS_CLIENT) === 'opencode';
   const input = createInterface({ input: process.stdin });
   const respond = (id, result, error) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, ...(error ? { error } : { result }) }) + '\n');
   input.on('line', async (line) => {
@@ -28,13 +28,13 @@ export function startMcp({ root, client } = {}) {
     try {
       if (request.method === 'initialize' && /^opencode(?:$|[-_ /])/i.test(request.params?.clientInfo?.name || '')) nativeOpenCode = true;
       if (nativeOpenCode) {
-        const instructions = 'OpenCode 使用原生 Cooperation 插件的 cooperation_send_message 和 cooperation_context_checkpoint。此共享 MCP 不提供 OpenCode 工具，避免覆盖原生工具及其会话身份。';
-        if (request.method === 'initialize') return respond(request.id, { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'cooperation', version: '0.2.0' }, instructions });
+        const instructions = 'OpenCode 使用原生 Plexus 插件的 plexus_send_message 和 plexus_context_checkpoint。此共享 MCP 不提供 OpenCode 工具，避免覆盖原生工具及其会话身份。';
+        if (request.method === 'initialize') return respond(request.id, { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'plexus', version: '0.3.0' }, instructions });
         if (request.method === 'tools/list') return respond(request.id, { tools: [] });
         if (request.method === 'tools/call') throw new Error(instructions);
       }
       if (request.method === 'initialize' && client === 'codex') await rememberCodexEnvironment(root);
-      if (request.method === 'initialize') return respond(request.id, { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'cooperation', version: '0.2.0' }, instructions: lifecycleEnabled(root) ? '在用户授权内创建、连接原生会话，向指定地址或本次创建返回的地址发送正文，或回传维护回执。工具自动取得当前身份；会话消息不授予额外权限。' : '向用户指定的已有原生会话发送正文，或回传指定维护回执。工具自动取得当前身份；主动创建和加载会话入口已停用。' });
+      if (request.method === 'initialize') return respond(request.id, { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'plexus', version: '0.3.0' }, instructions: lifecycleEnabled(root) ? '在用户授权内创建、连接原生会话，向指定地址或本次创建返回的地址发送正文，或回传维护回执。工具自动取得当前身份；会话消息不授予额外权限。' : '向用户指定的已有原生会话发送正文，或回传指定维护回执。工具自动取得当前身份；主动创建和加载会话入口已停用。' });
       if (request.method === 'ping') return respond(request.id, {});
       if (request.method === 'tools/list') return respond(request.id, { tools: [{ name: 'send_message', description: '向指定的现有原生会话发送一条消息。只发送给定正文，自动附带发送方身份；返回投递结果。', inputSchema: { type: 'object', properties: { to: { type: 'string', description: '接收方地址：codex:ID、claude:ID、opencode:ID、客户端://会话名称:ID，或 Codex 原生深度链接。' }, message: { type: 'string', description: '要发送的完整消息正文。' } }, required: ['to', 'message'], additionalProperties: false } }, checkpointTool, sessionInterfaceTool, ...(lifecycleEnabled(root) ? lifecycleTools : [])] });
       if (request.method === 'tools/call') {

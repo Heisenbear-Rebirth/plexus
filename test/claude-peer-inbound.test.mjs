@@ -41,14 +41,14 @@ test('the switch summary counts only verified sessions as active and names sessi
 
 test('the switch is off by default, keeps other wrapper settings, and changes only from the management page', async t => {
   const root = await mkdtemp(join(resolve('.'), '.http-test-peer-inbound-'));
-  const folder = join(root, '.cooperation', 'claude-wrapper'); await mkdir(folder, { recursive: true });
+  const folder = join(root, '.plexus', 'claude-wrapper'); await mkdir(folder, { recursive: true });
   await writeFile(join(folder, 'config.json'), JSON.stringify({ enabled: true, directories: [root], directoryScopes: [{ path: root, enabled: true, recursive: true }], peerMessageVisibility: false }));
   const server = await startServer({ root, port: 0, startMonitoring: false, adapters: { claude: { find: async () => null, list: async () => ({ sessions: [], warnings: [] }) } } });
   t.after(async () => { await server.close(); assert.ok(root.startsWith(resolve('.') + '\\') || root.startsWith(resolve('.') + '/')); await rm(root, { recursive: true, force: true }); });
   const config = await (await fetch(server.url + '/api/config')).json();
   assert.equal(config.claudePeerCrossModeAccept, false);
   const before = JSON.parse(await readFile(join(folder, 'config.json'), 'utf8'));
-  const post = (body, token = config.csrfToken) => fetch(server.url + '/api/claude-peer-inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-coop-ui': token }, body: JSON.stringify(body) });
+  const post = (body, token = config.csrfToken) => fetch(server.url + '/api/claude-peer-inbound', { method: 'POST', headers: { 'content-type': 'application/json', 'x-plexus-ui': token }, body: JSON.stringify(body) });
   assert.equal((await post({ enabled: true }, 'wrong')).status, 403);
   assert.equal((await post({ enabled: 'yes' })).status, 400);
   assert.deepEqual(await (await post({ enabled: true })).json(), { claudePeerCrossModeAccept: true });

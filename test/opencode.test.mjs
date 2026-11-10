@@ -20,7 +20,7 @@ import { defaultPromptValues } from '../public/prompt-templates.mjs';
 import { addressOf, visibleAddresses, connectionGuidance, openCodeContextState } from '../public/ui-state.mjs';
 
 async function fixture(t, options = {}) {
-  const parent = resolve('.cooperation/opencode-tests'); await mkdir(parent, { recursive: true });
+  const parent = resolve('.plexus/opencode-tests'); await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, 'case-'));
   const sessions = ['ses_TestSenderABC123', 'ses_TestReceiverDEF456'].map(id => ({ id, directory: root, title: id, time: { updated: Date.now() } }));
   const messages = new Map(), calls = [], states = {}, creates = [];
@@ -81,7 +81,7 @@ test('OpenCode discovers only the registered directory and sends during busy wit
   f.states[targetId] = { type: 'busy' };
   const runtime = createRuntime({ client: 'opencode', id: targetId }, { opencode: f.adapter });
   assert.equal((await runtime.status()).activity, 'running');
-  const messageId = randomUUID(), input = { targetId, messageId, text: 'source-labelled cooperation text', targetSession: { cwd: f.root } };
+  const messageId = randomUUID(), input = { targetId, messageId, text: 'source-labelled plexus text', targetSession: { cwd: f.root } };
   const [result, parallel] = await Promise.all([f.adapter.send(input), f.adapter.send(input)]);
   assert.equal(result.nativeMessageId, parallel.nativeMessageId); assert.equal(f.calls.length, 1);
   assert.equal(result.status, 'submitted'); assert.equal(result.nativeRecorded, true);
@@ -174,7 +174,7 @@ test('OpenCode native tool identity sends through isolated manager; caller-suppl
   const manager = await startServer({ root: f.root, port: 0, adapters: { opencode: f.adapter }, startMonitoring: false });
   try {
     const context = { directory: f.root, sessionID: f.sessions[0].id, messageID: nativeMessageId(), abort: new AbortController().signal,
-      ask: async request => { assert.equal(request.permission, 'cooperation_send_message'); } };
+      ask: async request => { assert.equal(request.permission, 'plexus_send_message'); } };
     const args = { to: 'opencode:' + f.sessions[1].id, message: 'verified native sender' };
     const result = JSON.parse(await f.bridge.sendMessage(args, context)); assert.equal(result.status, 'submitted');
     const saved = manager.store.getMessage(result.messageId); assert.equal(saved.from.id, context.sessionID); assert.ok(saved.nativeMessageId);
@@ -183,7 +183,7 @@ test('OpenCode native tool identity sends through isolated manager; caller-suppl
     assert.match(f.calls[0].body.parts[0].text, new RegExp('发送方地址：opencode:' + context.sessionID));
     await assert.rejects(f.bridge.sendMessage({ ...args, from: 'forged' }, context), /Only to and message/);
     await assert.rejects(f.bridge.sendMessage(args, { ...context, directory: join(f.root, 'other') }), /ToolContext/);
-    const connection = JSON.parse(await readFile(join(f.root, '.cooperation/connection.json'), 'utf8'));
+    const connection = JSON.parse(await readFile(join(f.root, '.plexus/connection.json'), 'utf8'));
     for (const client of ['opencode', 'OpenCode', ' opencode']) {
       const forged = await fetch(manager.url + '/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + connection.token },
         body: JSON.stringify({ ...args, from: { client, id: context.sessionID } }) });
@@ -193,13 +193,13 @@ test('OpenCode native tool identity sends through isolated manager; caller-suppl
     const config = await (await fetch(manager.url + '/api/config')).json();
     const filter = await (await fetch(manager.url + '/api/messages?addresses=' + encodeURIComponent(JSON.stringify(['opencode:' + context.sessionID])))).json();
     assert.equal(filter.messages.length, 1);
-    const rejected = await fetch(manager.url + '/api/policies', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Coop-UI': config.csrfToken }, body: JSON.stringify({ address: args.to, policy: { autoCompress: true } }) });
+    const rejected = await fetch(manager.url + '/api/policies', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Plexus-UI': config.csrfToken }, body: JSON.stringify({ address: args.to, policy: { autoCompress: true } }) });
     assert.equal(rejected.status, 400);
   } finally { await manager.close(); }
 });
 
 test('OpenCode observation cannot read legacy logs, request maintenance or use guessed CLI identity', async t => {
-  const f = await fixture(t), store = await new ManagementStore(join(f.root, '.cooperation')).init();
+  const f = await fixture(t), store = await new ManagementStore(join(f.root, '.plexus')).init();
   const monitor = new ContextMonitor({ store, service: { adapters: { opencode: f.adapter } } });
   try {
     const sample = await monitor.sample({ client: 'opencode', id: f.sessions[0].id, cwd: f.root });
@@ -218,7 +218,7 @@ test('Native OpenCode usage reaches the monitor and full-capacity percentage wit
   const f = await fixture(t), session = { client: 'opencode', id: f.sessions[0].id, cwd: f.root };
   f.messages.set('msg_Usage', { info: { id: 'msg_Usage', sessionID: session.id, role: 'assistant', modelID: 'actual', providerID: 'fixture',
     time: { created: Date.now(), completed: Date.now() }, tokens: { total: 1234 } }, parts: [] });
-  const store = await new ManagementStore(join(f.root, '.cooperation')).init();
+  const store = await new ManagementStore(join(f.root, '.plexus')).init();
   const monitor = new ContextMonitor({ store, service: { adapters: { opencode: f.adapter } } });
   try {
     const sample = await monitor.sample(session);
@@ -235,7 +235,7 @@ test('OpenCode usage diagnostics distinguish old plugins, missing samples, failu
   try {
     const config = await (await fetch(manager.url + '/api/config')).json();
     const sample = async () => {
-      const response = await fetch(manager.url + '/api/runtime', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Coop-UI': config.csrfToken },
+      const response = await fetch(manager.url + '/api/runtime', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Plexus-UI': config.csrfToken },
         body: JSON.stringify({ address: addressOf(session), native: true }) });
       assert.equal(response.status, 200);
       return response.json();
@@ -319,11 +319,11 @@ test('Lifecycle rejects out-of-scope, forged identity, native proof replay and C
     await assert.rejects(manager.service.lifecycle.execute('create', { ...args, directory: join(f.root,'outside') }, { kind: 'management-ui' }), /精确目录/);
     await assert.rejects(manager.service.lifecycle.execute('create', { ...args, from: 'forged' }, { kind: 'management-ui' }), /字段/);
     await assert.rejects(manager.service.lifecycle.execute('create', args, {}), /身份/);
-    const connection = JSON.parse(await readFile(join(f.root, '.cooperation/connection.json'), 'utf8'));
+    const connection = JSON.parse(await readFile(join(f.root, '.plexus/connection.json'), 'utf8'));
     const post = (path, body, headers = {}) => fetch(manager.url+path,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)});
     assert.equal((await post('/api/ui/lifecycle',{action:'create',args})).status,403);
     const config=await(await fetch(manager.url+'/api/config')).json();
-    const rejected=await post('/api/ui/lifecycle',{action:'create',args:{...args,directory:join(f.root,'outside')}},{'X-Coop-UI':config.csrfToken});
+    const rejected=await post('/api/ui/lifecycle',{action:'create',args:{...args,directory:join(f.root,'outside')}},{'X-Plexus-UI':config.csrfToken});
     assert.equal((await rejected.json()).notSubmitted,true);
     assert.equal((await post('/api/lifecycle',{action:'create',args,from:{client:'opencode',id:f.sessions[0].id}},{Authorization:'Bearer '+connection.token})).status,400);
     assert.equal((await post('/api/opencode/lifecycle',{instanceId:f.bridge.record.instanceId,proof:'a'.repeat(64)},{Authorization:'Bearer '+connection.token})).status,400);

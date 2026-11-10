@@ -13,7 +13,7 @@ test('management HTTP persists multiple roots and policies, limits mutations to 
   t.after(async () => { await server.close(); assert.ok(root.startsWith(resolve('.') + '\\') || root.startsWith(resolve('.') + '/')); await rm(root, { recursive: true, force: true }); });
   const config = await (await fetch(server.url + '/api/config')).json();
   assert.equal(config.installationDirectory, root);
-  const post = (path, body, token = config.csrfToken) => fetch(server.url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Coop-UI': token }, body: JSON.stringify(body) });
+  const post = (path, body, token = config.csrfToken) => fetch(server.url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Plexus-UI': token }, body: JSON.stringify(body) });
   assert.equal((await post('/api/directories', { path: child }, 'wrong')).status, 403);
   const directories = await (await post('/api/directories', { path: child })).json(); assert.equal(directories.directories.length, 2);
   assert.equal(directories.directories.find(d => d.id === directories.directory.id).claudeControlEnabled, false);
@@ -30,7 +30,7 @@ test('management HTTP persists multiple roots and policies, limits mutations to 
   const response = await fetch(server.url + '/api/monitoring');
   assert.equal((await response.text()).includes('private-hash'), false);
   assert.equal((await post('/api/directories/remove', { id: directories.directory.id })).status, 400);
-  const connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8'));
+  const connection = JSON.parse(await readFile(join(root, '.plexus', 'connection.json'), 'utf8'));
   assert.equal(config.token, undefined); assert.ok(connection.token);
 });
 
@@ -42,7 +42,7 @@ test('recursive project control is inherited by discovered Claude children and c
   } } });
   t.after(async () => { await server.close(); assert.ok(root.startsWith(resolve('.') + '\\') || root.startsWith(resolve('.') + '/')); await rm(root, { recursive: true, force: true }); });
   const config = await (await fetch(server.url + '/api/config')).json();
-  const post = (path, body) => fetch(server.url + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-coop-ui': config.csrfToken }, body: JSON.stringify(body) });
+  const post = (path, body) => fetch(server.url + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-plexus-ui': config.csrfToken }, body: JSON.stringify(body) });
   const parent = (await (await post('/api/directories', { path: root, recursive: true })).json()).directory;
   assert.equal((await post('/api/directories/claude-control', { id: parent.id, enabled: true })).status, 200);
   const sessions = await (await post('/api/sessions', { directoryIds: [parent.id] })).json();

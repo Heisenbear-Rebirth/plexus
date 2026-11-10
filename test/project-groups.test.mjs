@@ -10,16 +10,16 @@ import { addressOf, projectMembers, workspaceAddresses, messageMatches } from '.
 const a={client:'claude',id:'11111111-1111-4111-8111-111111111111',name:'实现会话',cwd:'project-a',directoryIds:['a']};
 const b={client:'codex',id:'22222222-2222-4222-8222-222222222222',name:'评审会话',cwd:'project-b',directoryIds:['b']};
 const c={client:'opencode',id:'ses_MixedCaseSession123',name:'文档会话',cwd:'project-c',directoryIds:['c']};
-async function scratch(t){const parent=resolve('.cooperation/group-tests');await mkdir(parent,{recursive:true});const root=await mkdtemp(join(parent,'case-'));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
+async function scratch(t){const parent=resolve('.plexus/group-tests');await mkdir(parent,{recursive:true});const root=await mkdtemp(join(parent,'case-'));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
 
 test('custom projects persist cross-directory members and leave policies and messages intact',async t=>{
-  const root=await scratch(t);let store=await new ManagementStore(join(root,'.cooperation')).init();
+  const root=await scratch(t);let store=await new ManagementStore(join(root,'.plexus')).init();
   try{
     store.savePolicy(a,{enabled:true,mode:'automatic'});store.create({id:'existing',from:a,to:b,text:'keep',createdAt:new Date().toISOString(),status:'submitted'});
     const groups=new ProjectGroups(store), first=groups.save({name:'产品研发',members:[addressOf(a),addressOf(b),addressOf(a),addressOf(c)],expectedRevision:0},[a,b,c]);
     assert.equal(first.members.length,3);assert.equal(first.members[2].id,c.id);
     const overlap=groups.save({name:'论文审阅',members:[addressOf(b)],expectedRevision:0},[b]);assert.equal(groups.list().length,2);
-    store.close();store=await new ManagementStore(join(root,'.cooperation')).init();const reopened=new ProjectGroups(store);
+    store.close();store=await new ManagementStore(join(root,'.plexus')).init();const reopened=new ProjectGroups(store);
     assert.deepEqual(reopened.list()[0],first);
     const renamed=reopened.save({id:first.id,name:'版本二',members:first.members.map(addressOf),expectedRevision:first.revision},[]);
     assert.equal(renamed.members.length,3);assert.equal(renamed.revision,2);
@@ -31,7 +31,7 @@ test('custom projects persist cross-directory members and leave policies and mes
 });
 
 test('group mutations validate membership, size and revision, preserve missing members only in their own group',async t=>{
-  const root=await scratch(t),store=await new ManagementStore(join(root,'.cooperation')).init();try{
+  const root=await scratch(t),store=await new ManagementStore(join(root,'.plexus')).init();try{
     const groups=new ProjectGroups(store);
     for(const input of [{name:' ',members:[]},{name:'x'.repeat(81),members:[]},{name:'x\ny',members:[]},{name:'x',members:['unknown:12345678']},{name:'x',members:[addressOf(a)]},{name:'x',members:Array(201).fill(addressOf(a))}])assert.throws(()=>groups.save({...input,expectedRevision:0},[]));
     assert.throws(()=>groups.save({name:'x',members:[]},[]),e=>e.statusCode===409);
@@ -63,7 +63,7 @@ test('group HTTP endpoints enforce CSRF, server-resolved members, revisions and 
   let manager=await startServer({root,port:0,startMonitoring:false,adapters});
   try{
     manager.store.saveDirectory({path:other,normalized:other.toLowerCase()});let config=await(await fetch(manager.url+'/api/config')).json();
-    const post=(path,body,csrf=config.csrfToken)=>fetch(manager.url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Coop-UI':csrf},body:JSON.stringify(body)});
+    const post=(path,body,csrf=config.csrfToken)=>fetch(manager.url+path,{method:'POST',headers:{'Content-Type':'application/json','X-Plexus-UI':csrf},body:JSON.stringify(body)});
     const input={name:'跨目录团队',members:sessions.map(addressOf),expectedRevision:0};
     assert.equal((await post('/api/groups',input,'wrong')).status,403);
     let response=await post('/api/groups',input);assert.equal(response.status,200);const group=(await response.json()).group;assert.equal(group.members.length,2);

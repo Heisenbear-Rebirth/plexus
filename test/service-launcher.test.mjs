@@ -9,15 +9,15 @@ import { randomUUID } from 'node:crypto';
 import { ManagementStore } from '../src/management-store.mjs';
 const exec = promisify(execFile);
 function isolatedEnvironment(extra = {}) {
-  const env = { ...process.env, COOP_PORT: '0', ...extra };
+  const env = { ...process.env, PLEXUS_PORT: '0', ...extra };
   for (const name of ['CODEX_APP_TOOLS_PIPE_PATH', 'CODEX_THREAD_ID', 'CODEX_MCP_NODE_PATH']) delete env[name];
   return env;
 }
 test('launchers start once, authenticate shutdown, and stop only their own manager', { skip: process.platform !== 'win32' }, async t => {
   const root = resolve('.');
   const scratch = await mkdtemp(join(root, '.launcher-test-with spaces-'));
-  const helper = join(scratch, 'bin', 'coop-service.mjs');
-  const run = action => exec(process.env.ComSpec || 'cmd.exe', ['/d', '/c', action === 'start' ? '启动项目.cmd' : '关闭项目.cmd'], { cwd: scratch, env: isolatedEnvironment({ COOP_NO_BROWSER: '1' }), windowsHide: true, timeout: 40000 });
+  const helper = join(scratch, 'bin', 'plexus-service.mjs');
+  const run = action => exec(process.env.ComSpec || 'cmd.exe', ['/d', '/c', action === 'start' ? '启动项目.cmd' : '关闭项目.cmd'], { cwd: scratch, env: isolatedEnvironment({ PLEXUS_NO_BROWSER: '1' }), windowsHide: true, timeout: 40000 });
   t.after(async () => {
     await run('stop').catch(() => {});
     assert.ok(scratch.startsWith(root + '\\') || scratch.startsWith(root + '/'));
@@ -27,15 +27,15 @@ test('launchers start once, authenticate shutdown, and stop only their own manag
   for (const filename of ['启动项目.cmd', '关闭项目.cmd']) await cp(join(root, filename), join(scratch, filename));
   // A lock from a previous boot now points to a live unrelated process (this test).
   // Its PID is alive, but its creation time is later than the old lock.
-  const staleStore = await new ManagementStore(join(scratch, '.cooperation')).init();
+  const staleStore = await new ManagementStore(join(scratch, '.plexus')).init();
   staleStore.db.prepare('INSERT INTO manager VALUES(1,?,?,?,?)').run('old-boot', process.pid, 1, '2000-01-01T00:00:00.000Z');
   staleStore.setSetting('preserved-fixture', { value: 'keep' }); staleStore.close();
   const first = await run('start'); assert.match(first.stdout, /Started:/);
-  const auditStore = await new ManagementStore(join(scratch, '.cooperation')).init();
+  const auditStore = await new ManagementStore(join(scratch, '.plexus')).init();
   assert.deepEqual(auditStore.getSetting('preserved-fixture'), { value: 'keep' });
   assert.throws(() => auditStore.acquireManager(), /已有管理服务/);
   auditStore.close();
-  const filename = join(scratch, '.cooperation', 'connection.json');
+  const filename = join(scratch, '.plexus', 'connection.json');
   const before = JSON.parse(await readFile(filename, 'utf8'));
   const again = await run('start'); assert.match(again.stdout, /Already running:/);
   assert.equal(JSON.parse(await readFile(filename, 'utf8')).pid, before.pid);
@@ -60,8 +60,8 @@ test('stopping the manager preserves an existing Claude transport and permits ne
     do { const value = await fn(); if (value) return value; await delay(30); } while (Date.now() < end);
     throw new Error('Claude fixture did not reach expected state.');
   }
-  const manager = action => exec(process.execPath, [join(scratch, 'bin', 'coop-service.mjs'), action], {
-    cwd: scratch, env: isolatedEnvironment({ COOP_NO_BROWSER: '1' }), windowsHide: true, timeout: 40000,
+  const manager = action => exec(process.execPath, [join(scratch, 'bin', 'plexus-service.mjs'), action], {
+    cwd: scratch, env: isolatedEnvironment({ PLEXUS_NO_BROWSER: '1' }), windowsHide: true, timeout: 40000,
   });
   t.after(async () => {
     await manager('stop').catch(() => {});
@@ -80,7 +80,7 @@ test('stopping the manager preserves an existing Claude transport and permits ne
     await mkdir(data); await writeFile(join(data, 'config.json'), JSON.stringify({ enabled: true, directories: [scratch] }));
     const child = spawn(join(root, 'bin', 'claude-wrapper.exe'), [process.execPath, join(root, 'test', 'fixtures', 'claude-wrapper-child.mjs'),
       '--input-format', 'stream-json', '--output-format', 'stream-json', '--resume', id],
-      { cwd: scratch, env: { ...process.env, COOP_WRAPPER_DATA_DIRECTORY: data }, windowsHide: true, stdio: ['pipe','pipe','pipe'] });
+      { cwd: scratch, env: { ...process.env, PLEXUS_WRAPPER_DATA_DIRECTORY: data }, windowsHide: true, stdio: ['pipe','pipe','pipe'] });
     child.stderr.resume();
     const messages = [], exited = new Promise(resolve => child.once('close', resolve));
     createInterface({ input: child.stdout }).on('line', line => messages.push(JSON.parse(line)));
@@ -118,5 +118,5 @@ test('stopping the manager preserves an existing Claude transport and permits ne
   second.send({ type: 'user', session_id: second.id, message: { role: 'user', content: 'new-peer-without-manager' } });
   await until(() => second.messages.some(m => m.type === 'assistant'));
   assert.equal(second.process.exitCode, null);
-  await assert.rejects(access(join(scratch, '.cooperation', 'connection.json')));
+  await assert.rejects(access(join(scratch, '.plexus', 'connection.json')));
 });

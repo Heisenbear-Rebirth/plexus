@@ -37,9 +37,9 @@ const capabilities = { readActivity: true, sendMessage: true, automaticMaintenan
 // for standalone TUI. Never start a replacement backend or copy provider keys.
 export async function createOpenCodeBridge({ client, directory }, { root = installationRoot, directories = [root], acceptUserMessages = false, maintenanceHooks = false } = {}) {
   (await readAccessPolicy()).assert(directory);
-  if (!directories.some(d => sameDirectory(d, directory))) throw new Error('OpenCode directory is not explicitly enabled for Cooperation.');
-  const folder = join(root, '.cooperation', 'opencode', 'instances');
-  const ledger = join(root, '.cooperation', 'opencode', 'deliveries');
+  if (!directories.some(d => sameDirectory(d, directory))) throw new Error('OpenCode directory is not explicitly enabled for Plexus.');
+  const folder = join(root, '.plexus', 'opencode', 'instances');
+  const ledger = join(root, '.plexus', 'opencode', 'deliveries');
   await mkdir(folder, { recursive: true }); await mkdir(ledger, { recursive: true });
   const instanceId = randomUUID(), token = randomBytes(32).toString('hex'), proofs = new Map(), inFlight = new Map();
   const query = { directory };
@@ -78,23 +78,25 @@ export async function createOpenCodeBridge({ client, directory }, { root = insta
       instanceId, displayConfirmed: false, modelProcessed: false, reopenConfirmed: false,
       detail: '已连接同一原生后端，可通过返回地址通信；原生窗口显示需单独核对。' };
   }
+  // Sessions created before the rename carry the earlier metadata key.
+  const operationOf = session => session?.metadata?.plexusOperationId ?? session?.metadata?.cooperationOperationId;
   async function reconcileCreate(operationId) {
     if (!uuid(operationId)) throw new Error('Invalid operation ID.');
     try {
-      const entry = JSON.parse(await readFile(join(root, '.cooperation', 'opencode', 'session-operations', operationId + '.json'), 'utf8'));
+      const entry = JSON.parse(await readFile(join(root, '.plexus', 'opencode', 'session-operations', operationId + '.json'), 'utf8'));
       if (entry.nativeSessionId) {
         const session = await native('get', entry.nativeSessionId);
-        if (session?.metadata?.cooperationOperationId === operationId && sameDirectory(session.directory, directory)) return connection(session.id, 'created');
+        if (operationOf(session) === operationId && sameDirectory(session.directory, directory)) return connection(session.id, 'created');
       }
     } catch { /* A missing local completion record still permits read-only native reconciliation. */ }
     const sessions = (await native('list')).filter(s => sameDirectory(s.directory, directory) && !s.parentID && !s.time?.archived
-      && s.metadata?.cooperationOperationId === operationId);
+      && operationOf(s) === operationId);
     if (sessions.length > 1) throw new Error('Native operation is ambiguous.');
     return sessions.length ? connection(sessions[0].id, 'created') : { status: 'unknown', detail: '尚未核实原生创建记录；不会重试创建。' };
   }
   async function createSession(input) {
     if (!sameDirectory(input.cwd, directory) || !uuid(input.operationId)) throw new Error('Invalid creation scope.');
-    const folder = join(root, '.cooperation', 'opencode', 'session-operations');
+    const folder = join(root, '.plexus', 'opencode', 'session-operations');
     await mkdir(folder, { recursive: true });
     const file = join(folder, input.operationId + '.json');
     const fingerprint = digest(JSON.stringify([directory, input.title, input.source?.client, input.source?.id]));
@@ -104,7 +106,7 @@ export async function createOpenCodeBridge({ client, directory }, { root = insta
       if (old.fingerprint !== fingerprint) throw new Error('Creation ID conflict.');
       return reconcileCreate(input.operationId);
     }
-    const body = { ...(input.title ? { title: input.title } : {}), metadata: { cooperationOperationId: input.operationId },
+    const body = { ...(input.title ? { title: input.title } : {}), metadata: { plexusOperationId: input.operationId },
       permission: [{ permission: '*', pattern: '*', action: 'ask' }] };
     if (input.source?.client === 'opencode') {
       if (!await find(input.source.id)) throw new Error('Source session unavailable.');
@@ -144,7 +146,7 @@ export async function createOpenCodeBridge({ client, directory }, { root = insta
   }
   async function send(input) {
     if (!acceptUserMessages) throw new Error('OpenCode 原生 user 消息接收尚未显式开启。');
-    if (!uuid(input.messageId) || typeof input.text !== 'string' || !input.text.trim() || Buffer.byteLength(input.text) > 300 * 1024) throw new Error('Invalid Cooperation message.');
+    if (!uuid(input.messageId) || typeof input.text !== 'string' || !input.text.trim() || Buffer.byteLength(input.text) > 300 * 1024) throw new Error('Invalid Plexus message.');
     if (!sameDirectory(input.cwd, directory) || !await find(input.targetId)) throw new Error('OpenCode target directory or session changed.');
     const prompts = (await readPromptSettings(root)).values;
     if (input.messageAffixes !== undefined) prompts.messages.opencode = input.messageAffixes;
@@ -155,7 +157,7 @@ export async function createOpenCodeBridge({ client, directory }, { root = insta
     let old;
     try { old = JSON.parse(await readFile(filename, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     if (old) {
-      if (old.inputFingerprint ? old.inputFingerprint !== inputFingerprint : old.fingerprint !== fingerprint) throw new Error('Cooperation message ID was reused with different content or target.');
+      if (old.inputFingerprint ? old.inputFingerprint !== inputFingerprint : old.fingerprint !== fingerprint) throw new Error('Plexus message ID was reused with different content or target.');
       return { ...old.result, nativeMessageId: old.nativeMessageId, ...(await evidence(old).catch(() => ({ nativeRecorded: false }))), duplicate: true };
     }
     if (maintenance.supported) {
@@ -268,7 +270,7 @@ export async function createOpenCodeBridge({ client, directory }, { root = insta
       proofs.set(proof, { action: 'checkpoint', args, from: { client: 'opencode', id: context.sessionID }, cwd: directory,
         nativeMessageId: context.messageID, nativeUserMessageId: message.info.parentID });
       try {
-        const connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8'));
+        const connection = JSON.parse(await readFile(join(root, '.plexus', 'connection.json'), 'utf8'));
         const response = await fetch(localEndpoint(connection.url) + '/api/opencode/checkpoint', { method: 'POST', redirect: 'error',
           headers: { Authorization: 'Bearer ' + connection.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ instanceId, proof }), signal: AbortSignal.timeout(30000) });
         if (!response.ok) throw new Error('维护回执被拒绝，请核对阶段、控制轮次和交付文档。');
@@ -279,11 +281,11 @@ export async function createOpenCodeBridge({ client, directory }, { root = insta
       if (!['create', 'connect'].includes(action) || Object.keys(args).some(k => !['requestId','client','directory','title','to','prompt'].includes(k))) throw new Error('Invalid lifecycle arguments.');
       if (!context || !sameDirectory(context.directory, directory) || !sessionId(context.sessionID) || !/^msg_/.test(context.messageID || '') || context.abort?.aborted || !await find(context.sessionID)) throw new Error('Missing native ToolContext identity.');
       if (!sameDirectory(args.directory, directory)) throw new Error('Lifecycle target must be this native project directory.');
-      await context.ask({ permission: 'cooperation_' + action + '_session', patterns: [args.to || args.client + ':' + directory], always: [], metadata: { action, directory, client: args.client, to: args.to } });
+      await context.ask({ permission: 'plexus_' + action + '_session', patterns: [args.to || args.client + ':' + directory], always: [], metadata: { action, directory, client: args.client, to: args.to } });
       const proof = randomBytes(32).toString('hex');
       proofs.set(proof, { action, args, from: { client: 'opencode', id: context.sessionID }, nativeMessageId: context.messageID, cwd: directory });
       try {
-        const connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8'));
+        const connection = JSON.parse(await readFile(join(root, '.plexus', 'connection.json'), 'utf8'));
         const response = await fetch(localEndpoint(connection.url) + '/api/opencode/lifecycle', { method: 'POST', redirect: 'error', headers: { Authorization: 'Bearer ' + connection.token, 'Content-Type': 'application/json' },
           body: JSON.stringify({ instanceId, proof }), signal: AbortSignal.timeout(45000) });
         if (!response.ok) throw new Error('Lifecycle request rejected.');
@@ -298,17 +300,17 @@ export async function createOpenCodeBridge({ client, directory }, { root = insta
       parseAddress(args.to);
       if (typeof args.message !== 'string' || !args.message.trim() || Buffer.byteLength(args.message) > 256 * 1024) throw new Error('Invalid message.');
       if (!await find(context.sessionID)) throw new Error('Native sender session unavailable.');
-      await context.ask({ permission: 'cooperation_send_message', patterns: [args.to], always: [], metadata: { to: args.to } });
+      await context.ask({ permission: 'plexus_send_message', patterns: [args.to], always: [], metadata: { to: args.to } });
       const proof = randomBytes(32).toString('hex');
       proofs.set(proof, { from: { client: 'opencode', id: context.sessionID }, to: args.to, message: args.message, nativeMessageId: context.messageID, cwd: directory });
       try {
-        const connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8'));
+        const connection = JSON.parse(await readFile(join(root, '.plexus', 'connection.json'), 'utf8'));
         const endpoint = localEndpoint(connection.url);
         const response = await fetch(endpoint + '/api/opencode/send', { method: 'POST', redirect: 'error', headers: { Authorization: 'Bearer ' + connection.token, 'Content-Type': 'application/json' },
           body: JSON.stringify({ instanceId, proof }), signal: AbortSignal.timeout(30000) });
-        if (!response.ok) throw new Error('Cooperation rejected the native send request.');
+        if (!response.ok) throw new Error('Plexus rejected the native send request.');
         return JSON.stringify(await response.json());
-      } catch { throw new Error('Cooperation send outcome is unconfirmed. Inspect communication history before retrying.'); }
+      } catch { throw new Error('Plexus send outcome is unconfirmed. Inspect communication history before retrying.'); }
       finally { proofs.delete(proof); }
     },
     async close() { await maintenance.close(); await Promise.allSettled([...inFlight.values()].map(item => item.work)); server.closeAllConnections(); await new Promise(ok => server.close(ok)); await unlink(registration).catch(() => {}); },

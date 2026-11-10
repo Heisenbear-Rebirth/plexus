@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DirectoryAccessPolicy } from '../src/access-policy.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 import { SessionLifecycle } from '../src/session-lifecycle.mjs';
 
 test('Protected-directory checks reject exact paths, children, extended paths and recursive ancestors without IO', () => {
@@ -14,7 +14,7 @@ test('Protected-directory checks reject exact paths, children, extended paths an
 test('Discovery and lifecycle reject protected paths before any filesystem discovery or native adapter invocation', async()=>{
   let calls=0;const adapters={codex:{list:async()=>{calls++;throw new Error('Should not discover');}}};
   const accessPolicy=new DirectoryAccessPolicy(['E:/Fixture/PrivateA','E:/Fixture/PrivateB']);
-  const service=new CooperationService({adapters,accessPolicy});
+  const service=new PlexusService({adapters,accessPolicy});
   await assert.rejects(service.sessions({directory:'E:/Fixture/PrivateA'}),{code:'DIRECTORY_PROTECTED'});
   await assert.rejects(service.sessions({directory:'E:/Fixture',recursive:true}),{code:'DIRECTORY_PROTECTED'});
   const lifecycle=new SessionLifecycle({store:{},adapters,root:'E:/Fixture/Manager',directories:['E:/Fixture/PrivateB'],accessPolicy});

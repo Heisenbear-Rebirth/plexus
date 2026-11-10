@@ -13,7 +13,7 @@ import { projectCodexState } from '../src/runtime/codex-runtime.mjs';
 
 async function harness(t, wasWorking = false, delayedInterrupt = false, recoveryEvidence, client = 'claude') {
   const root = await mkdtemp(join(resolve('.'), '.maintenance-test-'));
-  const store = await new ManagementStore(join(root, '.cooperation')).init();
+  const store = await new ManagementStore(join(root, '.plexus')).init();
   const target = { client, id: '11111111-1111-4111-8111-111111111111', cwd: root, name: 'fixture' };
   let count = 0, compactCount = 0, interruptCount = 0;
   const delivered = [];

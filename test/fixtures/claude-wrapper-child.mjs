@@ -6,10 +6,10 @@ import { randomUUID } from 'node:crypto';
 const resumeArg = process.argv.find(arg => arg.startsWith('--resume='));
 const id = resumeArg ? resumeArg.slice(9) : process.argv[process.argv.indexOf('--resume') + 1];
 const emit = message => {
-  if (process.env.COOP_FIXTURE_HISTORY && (['user', 'assistant'].includes(message.type) || message.type === 'system' && message.subtype === 'compact_boundary')) {
-    if (!resolve(process.env.COOP_FIXTURE_HISTORY).startsWith(resolve('.') + sep)) throw Error('Fixture history left its workspace');
+  if (process.env.PLEXUS_FIXTURE_HISTORY && (['user', 'assistant'].includes(message.type) || message.type === 'system' && message.subtype === 'compact_boundary')) {
+    if (!resolve(process.env.PLEXUS_FIXTURE_HISTORY).startsWith(resolve('.') + sep)) throw Error('Fixture history left its workspace');
     message = { ...message, uuid: message.uuid || randomUUID() };
-    appendFileSync(process.env.COOP_FIXTURE_HISTORY, JSON.stringify({ ...message, sessionId: id, cwd: process.cwd(), timestamp: new Date().toISOString() }) + '\n');
+    appendFileSync(process.env.PLEXUS_FIXTURE_HISTORY, JSON.stringify({ ...message, sessionId: id, cwd: process.cwd(), timestamp: new Date().toISOString() }) + '\n');
   }
   return process.stdout.write(JSON.stringify(message) + '\n');
 };
@@ -46,11 +46,11 @@ createInterface({ input: process.stdin }).on('line', async line => {
     }
     return;
   }
-  if (message.type === 'fixture_release_checkpoint' && checkpointRequest && process.env.COOP_FIXTURE_MANAGER_PATH) {
+  if (message.type === 'fixture_release_checkpoint' && checkpointRequest && process.env.PLEXUS_FIXTURE_MANAGER_PATH) {
     const args = checkpointRequest; checkpointRequest = null;
     if (!resolve(args.documentPath).startsWith(resolve('.') + sep)) throw Error('Fixture document left its workspace');
     if (args.stage === 'handoff') { await mkdir(dirname(args.documentPath), { recursive: true }); await writeFile(args.documentPath, 'Deterministic original task handoff'); }
-    const manager = JSON.parse(await readFile(process.env.COOP_FIXTURE_MANAGER_PATH, 'utf8'));
+    const manager = JSON.parse(await readFile(process.env.PLEXUS_FIXTURE_MANAGER_PATH, 'utf8'));
     const response = await fetch(manager.url + '/api/checkpoint', { method: 'POST', headers: { authorization: 'Bearer ' + manager.token, 'content-type': 'application/json' },
       body: JSON.stringify({ ...args, from: { client: 'claude', id, cwd: process.cwd() } }) });
     const result = await response.json(); emit({ type: 'fixture_receipt', stage: args.stage, status: result.status || 'rejected', httpStatus: response.status });
@@ -63,19 +63,19 @@ createInterface({ input: process.stdin }).on('line', async line => {
       for (const [key, value] of Object.entries(message.request.settings || {})) if (value === null) delete flagSettings[key]; else flagSettings[key] = value;
       if (Object.hasOwn(message.request.settings || {}, 'crossSessionInbound')) {
         emit({ type: 'fixture_flag_settings', settings: { ...flagSettings }, requestId: message.request_id });
-        if (process.env.COOP_FIXTURE_REJECT_FLAGS === '1') { emit({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'fixture rejected' } }); return; }
+        if (process.env.PLEXUS_FIXTURE_REJECT_FLAGS === '1') { emit({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'fixture rejected' } }); return; }
         emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id } }); return;
       }
     }
     if (message.request.subtype === 'get_settings') {
       emit({ type: 'fixture_settings_request' });
-      if (process.env.COOP_FIXTURE_SETTINGS_DELAY_MS) await new Promise(r => setTimeout(r, Number(process.env.COOP_FIXTURE_SETTINGS_DELAY_MS)));
+      if (process.env.PLEXUS_FIXTURE_SETTINGS_DELAY_MS) await new Promise(r => setTimeout(r, Number(process.env.PLEXUS_FIXTURE_SETTINGS_DELAY_MS)));
       emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {
-        applied: { model: process.env.COOP_FIXTURE_SELECTED_MODEL || 'fixture', effort: selectedEffort },
+        applied: { model: process.env.PLEXUS_FIXTURE_SELECTED_MODEL || 'fixture', effort: selectedEffort },
         merged: { env: { PRIVATE_FIXTURE_TOKEN: 'must-not-leave-native-channel' } },
         sources: [{ source: 'userSettings', settings: { env: { PRIVATE_FIXTURE_TOKEN: 'must-not-leave-native-channel' } } },
           ...(Object.keys(flagSettings).length ? [{ source: 'flagSettings', settings: { ...flagSettings } }] : []),
-          ...(process.env.COOP_FIXTURE_POLICY_INBOUND ? [{ source: 'policySettings', settings: { crossSessionInbound: process.env.COOP_FIXTURE_POLICY_INBOUND } }] : [])],
+          ...(process.env.PLEXUS_FIXTURE_POLICY_INBOUND ? [{ source: 'policySettings', settings: { crossSessionInbound: process.env.PLEXUS_FIXTURE_POLICY_INBOUND } }] : [])],
       } } }); return;
     }
     if (message.request.subtype === 'interrupt') {
@@ -97,10 +97,10 @@ createInterface({ input: process.stdin }).on('line', async line => {
       return;
     }
     emit({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {} } });
-    if (process.env.COOP_FIXTURE_DEFER_INIT !== '1') emit({ type: 'system', subtype: 'init', session_id: id, ...(process.env.COOP_FIXTURE_MANAGER_PATH ? { model: 'fixture' } : {}) });
+    if (process.env.PLEXUS_FIXTURE_DEFER_INIT !== '1') emit({ type: 'system', subtype: 'init', session_id: id, ...(process.env.PLEXUS_FIXTURE_MANAGER_PATH ? { model: 'fixture' } : {}) });
   } else if (message.type === 'user') {
     emit({ ...message, fixtureReceivedExactly: true });
-    const checkpoint = process.env.COOP_FIXTURE_MANAGER_PATH && /context_checkpoint：(\{[^\n]+\})/.exec(message.message.content);
+    const checkpoint = process.env.PLEXUS_FIXTURE_MANAGER_PATH && /context_checkpoint：(\{[^\n]+\})/.exec(message.message.content);
     if (checkpoint) {
       checkpointRequest = JSON.parse(checkpoint[1]);
       emit({ type: 'assistant', session_id: id, message: { model: '<synthetic>', content: [], usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } });
@@ -114,7 +114,7 @@ createInterface({ input: process.stdin }).on('line', async line => {
     if (message.message.content === '/compact') {
       emit({ type: 'system', subtype: 'status', status: 'compacting', session_id: id });
       if (!process.argv.includes('--no-boundary')) emit({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual', pre_tokens: 12345 }, session_id: id });
-      if (process.env.COOP_FIXTURE_HOLD_COMPACT === '1') return;
+      if (process.env.PLEXUS_FIXTURE_HOLD_COMPACT === '1') return;
       emit({ type: 'result', subtype: 'success', is_error: false, session_id: id });
     } else if (message.message.content === 'quota-failure') {
       emit({ type: 'rate_limit_event', session_id: id, rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', utilization: 1, resetsAt: 1893456000 } });

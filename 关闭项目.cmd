@@ -8,7 +8,7 @@ if errorlevel 1 (
   popd
   exit /b 1
 )
-node "%~dp0bin\coop-service.mjs" stop
+node "%~dp0bin\plexus-service.mjs" stop
 if errorlevel 1 (
   pause
   popd

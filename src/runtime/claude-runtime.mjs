@@ -15,7 +15,7 @@ function controlRequestId(options) {
 }
 
 export class ClaudeRuntime {
-  constructor(sessionId, { folder = fileURLToPath(new URL('../../.cooperation/claude-wrapper/instances/', import.meta.url)), peerVerdictMs = 1500 } = {}) {
+  constructor(sessionId, { folder = fileURLToPath(new URL('../../.plexus/claude-wrapper/instances/', import.meta.url)), peerVerdictMs = 1500 } = {}) {
     if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error('Invalid Claude session ID.');
     this.id = sessionId.toLowerCase(); this.folder = folder; this.peerVerdictMs = peerVerdictMs;
   }

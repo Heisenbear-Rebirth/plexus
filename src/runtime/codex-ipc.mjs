@@ -28,7 +28,7 @@ export class CodexIpc extends EventEmitter {
       this.socket.once('error', error => { clearTimeout(timer); reject(fail(`CODEX_IPC_OFFLINE:${error.code || 'UNKNOWN'}`)); });
     });
     try {
-      const result = await this.request('initialize', { clientType: 'cooperation-runtime' });
+      const result = await this.request('initialize', { clientType: 'plexus-runtime' });
       if (typeof result.result?.clientId !== 'string') throw fail('CODEX_IPC_REGISTRATION_FAILED');
       this.clientId = result.result.clientId; return this;
     } catch (error) { this.close(); throw error; }

@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { CodexBridgeConnection, rememberCodexBridge, rememberCodexEnvironment } from '../src/codex-bridge-connection.mjs';
 import { startServer } from '../src/http-server.mjs';
-const context = suffix => ({ pipePath: '\\\\.\\pipe\\cooperation-test-' + suffix, callerThreadId: '11111111-1111-4111-8111-111111111111', nodePath: process.execPath });
+const context = suffix => ({ pipePath: '\\\\.\\pipe\\plexus-test-' + suffix, callerThreadId: '11111111-1111-4111-8111-111111111111', nodePath: process.execPath });
 async function fixture(t) {
   const base = resolve('.'), root = await mkdtemp(join(base, '.bridge-test-'));
   t.after(async () => { assert.equal(resolve(root).startsWith(base + '\\') || resolve(root).startsWith(base + '/'), true); await rm(root, { recursive: true, force: true }); });
@@ -41,7 +41,7 @@ test('capture needs a real environment connection and never invents a caller ide
   await rememberCodexBridge(root, first);
   assert.equal(await rememberCodexEnvironment(root, {}), false);
   assert.equal(await rememberCodexEnvironment(root, { CODEX_APP_TOOLS_PIPE_PATH: context('second').pipePath, CODEX_MCP_NODE_PATH: process.execPath }), true);
-  const saved = JSON.parse(await readFile(join(root, '.cooperation/codex-bridge.json'), 'utf8')).context;
+  const saved = JSON.parse(await readFile(join(root, '.plexus/codex-bridge.json'), 'utf8')).context;
   assert.equal(saved.callerThreadId, first.callerThreadId); assert.equal(saved.pipePath, context('second').pipePath);
   assert.equal(await rememberCodexBridge(root, { ...first, pipePath: 'https://example.invalid' }), false);
 });
@@ -64,8 +64,8 @@ test('a relay with only the recipient as a captured caller defers before any sen
   finally { await bridge.close(); }
 });
 test('invalid persisted connection data cannot start an executable', async t => {
-  const root = await fixture(t); await mkdir(join(root, '.cooperation'));
-  await writeFile(join(root, '.cooperation/codex-bridge.json'), JSON.stringify({ version: 1, context: { ...context('first'), nodePath: 'relative-script' } }));
+  const root = await fixture(t); await mkdir(join(root, '.plexus'));
+  await writeFile(join(root, '.plexus/codex-bridge.json'), JSON.stringify({ version: 1, context: { ...context('first'), nodePath: 'relative-script' } }));
   let probes = 0;
   const bridge = await new CodexBridgeConnection({ root, probe: async () => { probes++; }, intervalMs: 60000 }).init();
   try { assert.equal(bridge.status().connected, false); assert.equal(probes, 0); } finally { await bridge.close(); }
@@ -88,6 +88,6 @@ test('Codex MCP initialization automatically publishes its host connection', asy
   let output = ''; child.stdout.on('data', bytes => output += bytes); child.stderr.resume();
   const exited = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', code => code === 0 ? resolve() : reject(Error('MCP initialization failed'))); });
   child.stdin.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n');
-  await exited; assert.equal(JSON.parse(output.trim()).result.serverInfo.name, 'cooperation');
-  assert.deepEqual(JSON.parse(await readFile(join(root, '.cooperation/codex-bridge.json'), 'utf8')).context, saved);
+  await exited; assert.equal(JSON.parse(output.trim()).result.serverInfo.name, 'plexus');
+  assert.deepEqual(JSON.parse(await readFile(join(root, '.plexus/codex-bridge.json'), 'utf8')).context, saved);
 });

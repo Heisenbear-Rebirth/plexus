@@ -1,13 +1,13 @@
 {
-  "name": "cooperation",
-  "version": "0.2.0",
+  "name": "plexus",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Local messaging between existing Codex and Claude Code conversations, with a user management page.",
+  "description": "Client-agnostic, free-topology collaboration between local AI coding sessions (Codex, Claude Code, OpenCode and external programs), with context maintenance and a management page.",
   "engines": { "node": ">=22.13" },
   "scripts": {
-    "start": "node bin/coop.mjs serve",
+    "start": "node bin/plexus.mjs serve",
     "test": "node --test test/*.test.mjs"
   },
-  "bin": { "coop": "bin/coop.mjs" }
+  "bin": { "plexus": "bin/plexus.mjs" }
 }

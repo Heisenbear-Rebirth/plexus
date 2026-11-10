@@ -16,14 +16,14 @@ export async function sessionHookViaManager(root, payload) {
 }
 // External programs authenticate with the session interface key only.
 export async function notifyViaManager(root, { key, text, source }) {
-  if (typeof key !== 'string' || !key.trim()) throw new Error('请提供会话接口密钥（--hook 或环境变量 COOP_HOOK_KEY）。');
+  if (typeof key !== 'string' || !key.trim()) throw new Error('请提供会话接口密钥（--hook 或环境变量 PLEXUS_HOOK_KEY）。');
   return requestManager(root, '/api/hooks/notify', { text, ...(source ? { source } : {}) }, key.trim());
 }
 async function requestManager(root, endpoint, payload, bearer) {
   if (payload.from?.client === 'codex') await rememberCodexBridge(root, codexContextFromEnvironment(process.env, payload.from.id));
   let connection;
-  try { connection = JSON.parse(await readFile(join(root, '.cooperation', 'connection.json'), 'utf8')); }
-  catch { throw new Error('管理台尚未启动。请在 Codex 会话的终端运行 node bin/coop.mjs serve。'); }
+  try { connection = JSON.parse(await readFile(join(root, '.plexus', 'connection.json'), 'utf8')); }
+  catch { throw new Error('管理台尚未启动。请在 Codex 会话的终端运行 node bin/plexus.mjs serve。'); }
   const url = new URL(connection.url);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw new Error('通信服务必须是本机地址。');
   let response;

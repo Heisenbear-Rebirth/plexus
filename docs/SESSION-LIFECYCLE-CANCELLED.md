@@ -1,6 +1,6 @@
 # 主动创建与加载会话：已取消
 
-发布版通过仓库根目录 `session-lifecycle-cancelled.json` 保持停用，新克隆不依赖本机 `.cooperation/`。下文为脱敏后的历史收尾记录；目录访问边界仅约束开发助手，产品正常管理用户添加的项目。
+发布版通过仓库根目录 `session-lifecycle-cancelled.json` 保持停用，新克隆不依赖本机 `.plexus/`。下文为脱敏后的历史收尾记录；目录访问边界仅约束开发助手，产品正常管理用户添加的项目。
 
 用户已明确取消此方向，要求保存进度，并撤销本次尝试造成的项目外文件改动。不得自动恢复研究、启动测试客户端或创建新会话。
 
@@ -11,8 +11,8 @@
 - Codex 原生 create_thread 接口已从安装代码核实，但 App Tools 连接未恢复，没有执行真实 Codex 创建。
 - Claude 原生界面接入仍为未验证实验代码。直接 CLI 初始化只得到临时 ID；带首轮的专用测试持久化了历史，但认证失败，没有可用通信入口。
 - 最近完整测试为145项通过；此后目录保护相关45项测试通过。最后添加的 Claude native-ui adapter、VS Code 扩展和包装器标识变更尚未完成回归。
-- 当前源码和本地证据保留在 Cooperation，未提交或推送。另已在 `.cooperation/cleanup/session-lifecycle-cancelled/project-progress/` 保存90个项目文件及SHA256清单，作为取消前进度快照。真实 manager 和当前 OpenCode 插件没有更新。
-- 本工作副本通过 `.cooperation/session-lifecycle-cancelled.json` 停用实验入口：MCP及OpenCode插件不再公布创建/连接工具，管理页不再提供对应能力，旧调用在身份查询和创建意图落盘前拒绝。VS Code试验扩展和原生实验启动脚本也会直接停止。不要自动删除这一取消标记。
+- 当前源码和本地证据保留在 Plexus，未提交或推送。另已在 `.plexus/cleanup/session-lifecycle-cancelled/project-progress/` 保存90个项目文件及SHA256清单，作为取消前进度快照。真实 manager 和当前 OpenCode 插件没有更新。
+- 本工作副本通过 `.plexus/session-lifecycle-cancelled.json` 停用实验入口：MCP及OpenCode插件不再公布创建/连接工具，管理页不再提供对应能力，旧调用在身份查询和创建意图落盘前拒绝。VS Code试验扩展和原生实验启动脚本也会直接停止。不要自动删除这一取消标记。
 
 ## 清理范围
 
@@ -33,9 +33,9 @@
 
 ## 清理结果
 
-已清理18个有明确本轮归属的项目外文件，删除前均备份到 `.cooperation/cleanup/session-lifecycle-cancelled/external-backup/` 并校验SHA256：
+已清理18个有明确本轮归属的项目外文件，删除前均备份到 `.plexus/cleanup/session-lifecycle-cancelled/external-backup/` 并校验SHA256：
 
-- 1个 Claude 测试历史：`.claude/projects/E--Projects-Cooperation/00000000-0000-4000-8000-000000000001.jsonl`。
+- 1个 Claude 测试历史：`.claude/projects/E--Projects-Plexus/00000000-0000-4000-8000-000000000001.jsonl`。
 - 15个专用 VS Code `logs/20260918T154748/window3` 文件及空目录。
 - 2个本轮首次创建的 VS Code `User/workspaceStorage/ext-dev` 状态库文件及目录；NTFS创建时间08:21:24.878Z与专用窗口吻合。
 

@@ -16,7 +16,7 @@ async function approveRestart(manager) {
   const config = await (await fetch(manager.url + '/api/config')).json();
   const status = await (await fetch(manager.url + '/api/monitoring')).json();
   assert.ok(status.restartConfirmations.length, 'restart must require consent');
-  const response = await fetch(manager.url + '/api/restart-confirmation', { method: 'POST', headers: { 'content-type': 'application/json', 'x-coop-ui': config.csrfToken },
+  const response = await fetch(manager.url + '/api/restart-confirmation', { method: 'POST', headers: { 'content-type': 'application/json', 'x-plexus-ui': config.csrfToken },
     body: JSON.stringify({ bootId: status.bootId, items: status.restartConfirmations.map(({ id, revision }) => ({ id, revision })), action: 'approve' }) });
   assert.equal(response.status, 200);
 }
@@ -28,8 +28,8 @@ async function until(fn, label) {
   throw Error('Timed out: ' + label);
 }
 async function fixture(t) {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'restart-test-')), id = randomUUID();
-  t.after(async () => { assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+  const root = await mkdtemp(join(resolve('.plexus'), 'restart-test-')), id = randomUUID();
+  t.after(async () => { assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   const state = new ClaudeProtocolState(id); state.initialized = true; state.model = 'fixture';
   const directory = join(root, 'journal'), head = { verified: true, cwd: root, quotaError: true };
   const journal = () => new ClaudeQuotaJournal({ directory, sessionId: id, cwd: root, readHead: async () => structuredClone(head) });
@@ -67,9 +67,9 @@ test('reopened quota recovery distinguishes a resolved model label from an actua
 });
 
 async function protocolFixture(t) {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'restart-protocol-')), id = randomUUID();
+  const root = await mkdtemp(join(resolve('.plexus'), 'restart-protocol-')), id = randomUUID();
   const config = join(root, 'claude'), history = join(config, 'projects', root.replace(/[^a-zA-Z0-9]/g, '-'), id + '.jsonl');
-  const wrapperRoot = join(root, '.cooperation', 'claude-wrapper'); await mkdir(wrapperRoot, { recursive: true });
+  const wrapperRoot = join(root, '.plexus', 'claude-wrapper'); await mkdir(wrapperRoot, { recursive: true });
   await mkdir(resolve(history, '..'), { recursive: true });
   await writeFile(join(wrapperRoot, 'config.json'), JSON.stringify({ enabled: true, directories: [root] }));
   await writeFile(join(root, 'quota-utilization.json'), JSON.stringify({ value: 100 }));
@@ -77,13 +77,13 @@ async function protocolFixture(t) {
   t.after(async () => {
     await manager?.close();
     for (const p of processes) { if (p.child.exitCode === null && p.child.signalCode === null) p.child.kill(); await p.exited; }
-    assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true });
+    assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true });
   });
   async function launch(extraEnv = {}, extraArgs = [], equals = false) {
     const child = spawn(resolve('bin/claude-wrapper.exe'), [process.execPath, resolve('test/fixtures/claude-wrapper-child.mjs'),
       ...(equals ? ['--input-format=stream-json', '--resume=' + id] : ['--input-format', 'stream-json', '--resume', id]), ...extraArgs], {
       cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CLAUDE_CONFIG_DIR: config,
-        COOP_WRAPPER_DATA_DIRECTORY: wrapperRoot, COOP_FIXTURE_HISTORY: history, COOP_FIXTURE_MANAGER_PATH: join(root, '.cooperation', 'connection.json'), ...extraEnv },
+        PLEXUS_WRAPPER_DATA_DIRECTORY: wrapperRoot, PLEXUS_FIXTURE_HISTORY: history, PLEXUS_FIXTURE_MANAGER_PATH: join(root, '.plexus', 'connection.json'), ...extraEnv },
     });
     const messages = [], errors = []; let buffer = '';
     child.stdout.on('data', b => { buffer += b.toString(); let index; while ((index = buffer.indexOf('\n')) >= 0) {
@@ -118,7 +118,7 @@ test('only applied model and effort escape the native settings response; launch 
 });
 
 for (const equals of [false, true]) test(`a reopened idle session reads settings before its first business prompt with ${equals ? 'equals' : 'separate'} CLI arguments and no quota journal`, async t => {
-  const h = await protocolFixture(t), client = await h.launch({ COOP_FIXTURE_DEFER_INIT: '1' }, ['--permission-mode', 'auto'], equals);
+  const h = await protocolFixture(t), client = await h.launch({ PLEXUS_FIXTURE_DEFER_INIT: '1' }, ['--permission-mode', 'auto'], equals);
   const state = await until(async () => { const r = await h.runtime().status(); return r.model && r; }, 'current idle selection');
   assert.equal(state.model, 'fixture'); assert.equal(state.permissionMode, 'auto'); assert.equal(state.activity, 'idle');
   assert.equal(client.messages.some(m => m.fixtureReceivedExactly), false);
@@ -133,7 +133,7 @@ for (const order of ['manager-first', 'client-first']) test(`realistic ${order} 
   await h.stop(); first.child.kill(); await first.exited;
   await writeFile(join(h.root, 'quota-utilization.json'), JSON.stringify({ value: 5 }));
   let second;
-  const reopen = () => h.launch({ COOP_FIXTURE_DEFER_INIT: '1', COOP_FIXTURE_SETTINGS_DELAY_MS: '350' }, ['--permission-mode=auto'], true);
+  const reopen = () => h.launch({ PLEXUS_FIXTURE_DEFER_INIT: '1', PLEXUS_FIXTURE_SETTINGS_DELAY_MS: '350' }, ['--permission-mode=auto'], true);
   if (order === 'manager-first') { manager = await h.start(); second = await reopen(); } else { second = await reopen(); manager = await h.start(); }
   const state = await until(async () => { const r = await h.runtime().status(); return r.quota && r; }, 'verified original failure without new input');
   assert.equal(state.model, 'fixture'); assert.equal(state.permissionMode, 'auto'); assert.equal(state.effort, 'high');
@@ -152,7 +152,7 @@ test('slow startup settings reads keep Claude connected and never overwrite newe
   const h = await protocolFixture(t), first = await h.launch({}, ['--permission-mode', 'auto']);
   first.send({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'quota-failure' } });
   await until(async () => (await h.runtime().status()).quota, 'failure'); first.child.kill(); await first.exited;
-  const second = await h.launch({ COOP_FIXTURE_DEFER_INIT: '1', COOP_FIXTURE_SETTINGS_DELAY_MS: '3000', COOP_FIXTURE_SELECTED_MODEL: 'stale-read' }, ['--permission-mode', 'auto']);
+  const second = await h.launch({ PLEXUS_FIXTURE_DEFER_INIT: '1', PLEXUS_FIXTURE_SETTINGS_DELAY_MS: '3000', PLEXUS_FIXTURE_SELECTED_MODEL: 'stale-read' }, ['--permission-mode', 'auto']);
   const started = Date.now(), pending = await h.runtime().status(); assert.ok(Date.now() - started < 1500);
   assert.equal(pending.connected, true); assert.equal(pending.quotaRestart.stage, 'settings');
   const input = randomUUID(); second.send({ type: 'user', uuid: input, message: { role: 'user', content: 'hold' } });
@@ -165,7 +165,7 @@ test('a genuinely changed native model does not restore the saved quota failure'
   const h = await protocolFixture(t), first = await h.launch({}, ['--permission-mode', 'auto']);
   first.send({ type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'quota-failure' } });
   await until(async () => (await h.runtime().status()).quota, 'failure'); first.child.kill(); await first.exited;
-  const second = await h.launch({ COOP_FIXTURE_DEFER_INIT: '1', COOP_FIXTURE_SELECTED_MODEL: 'changed' }, ['--permission-mode', 'auto']);
+  const second = await h.launch({ PLEXUS_FIXTURE_DEFER_INIT: '1', PLEXUS_FIXTURE_SELECTED_MODEL: 'changed' }, ['--permission-mode', 'auto']);
   const state = await until(async () => { const r = await h.runtime().status(); return !r.quotaRestart && r.model && r; }, 'verified changed model');
   assert.equal(state.model, 'changed'); assert.equal(state.quota, null); assert.equal(second.messages.some(m => m.fixtureReceivedExactly), false);
 });
@@ -250,7 +250,7 @@ for (const stage of ['writing_handoff', 'awaiting_handoff_end', 'compacting', 'r
     await manager.controller.advance(id);
     assert.equal(manager.store.cycle(id).state, 'completed');
     assert.deepEqual(h.delivered, ['held-during-restart']);
-    const audit = (await readFile(join(h.root, '.cooperation', 'claude-wrapper', 'compactions.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+    const audit = (await readFile(join(h.root, '.plexus', 'claude-wrapper', 'compactions.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
     assert.equal(audit.filter(row => row.type === 'requested').length, 1);
   });
 
@@ -267,7 +267,7 @@ test('Claude failure saved while the manager is stopped can resume after both re
 });
 
 test('shutdown during native compaction retains its boundary and holds the queue when completion is unknown', async t => {
-  const h = await protocolFixture(t), first = await h.launch({ COOP_FIXTURE_HOLD_COMPACT: '1' }); let manager = await h.start();
+  const h = await protocolFixture(t), first = await h.launch({ PLEXUS_FIXTURE_HOLD_COMPACT: '1' }); let manager = await h.start();
   const sample = await manager.monitor.sample(h.session);
   const cycle = await manager.controller.trigger(h.session, manager.store.getPolicy(h.session), { ...sample, decision: { trigger: 'soft', wasWorkingAtTrigger: false } });
   await until(() => first.messages.some(m => m.type === 'fixture_pending_checkpoint'), 'handoff');
@@ -284,6 +284,6 @@ test('shutdown during native compaction retains its boundary and holds the queue
   await manager.controller.advance(cycle.id);
   const record = manager.store.cycle(cycle.id); assert.equal(record.state, 'needs_attention'); assert.equal(record.recoveryBlocked, true);
   assert.match(record.reason, /压缩结果无法确认/); assert.equal(manager.store.activeCycle(h.session).id, cycle.id);
-  const audit = (await readFile(join(h.root, '.cooperation', 'claude-wrapper', 'compactions.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  const audit = (await readFile(join(h.root, '.plexus', 'claude-wrapper', 'compactions.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
   assert.equal(audit.filter(row => row.type === 'requested').length, 1);
 });

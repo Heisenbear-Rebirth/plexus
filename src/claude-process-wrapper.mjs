@@ -16,18 +16,18 @@ import { wrapperEnabledFor } from './wrapper-directories.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const normalize = value => resolve(value).replace(/^\\\\\?\\/, '').replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
-const dataDirectory = process.env.COOP_WRAPPER_DATA_DIRECTORY ? resolve(process.env.COOP_WRAPPER_DATA_DIRECTORY) : join(root, '.cooperation', 'claude-wrapper');
-if (!normalize(dataDirectory).startsWith(normalize(root) + '/')) throw new Error('Wrapper data must stay inside the Cooperation project.');
+const dataDirectory = process.env.PLEXUS_WRAPPER_DATA_DIRECTORY ? resolve(process.env.PLEXUS_WRAPPER_DATA_DIRECTORY) : join(root, '.plexus', 'claude-wrapper');
+if (!normalize(dataDirectory).startsWith(normalize(root) + '/')) throw new Error('Wrapper data must stay inside the Plexus project.');
 const [binary, ...args] = process.argv.slice(2);
-if (!binary) { process.stderr.write('[Cooperation] Missing original Claude executable.\n'); process.exit(1); }
+if (!binary) { process.stderr.write('[Plexus] Missing original Claude executable.\n'); process.exit(1); }
 let enabled = false;
-let peerMessageVisibility = process.env.COOP_PEER_MESSAGE_VISIBILITY !== '0';
+let peerMessageVisibility = process.env.PLEXUS_PEER_MESSAGE_VISIBILITY !== '0';
 // Reopening must not append old messages as if they were new arrivals.
-let peerHistoryVisibility = process.env.COOP_PEER_HISTORY_VISIBILITY === '1';
+let peerHistoryVisibility = process.env.PLEXUS_PEER_HISTORY_VISIBILITY === '1';
 try {
   const config = JSON.parse(await readFile(join(dataDirectory, 'config.json'), 'utf8'));
   peerMessageVisibility &&= config.peerMessageVisibility !== false;
-  peerHistoryVisibility = process.env.COOP_PEER_HISTORY_VISIBILITY !== '0'
+  peerHistoryVisibility = process.env.PLEXUS_PEER_HISTORY_VISIBILITY !== '0'
     && (peerHistoryVisibility || config.peerHistoryVisibility === true);
   enabled = wrapperEnabledFor(config, process.cwd()) && launchOption(args, '--input-format') === 'stream-json';
 } catch { /* No project configuration means pure passthrough. */ }
@@ -46,7 +46,7 @@ let selectionReading = null, nextSelectionRead = 0;
 let selectionRead = null;
 const controlOperations = new Map();
 let registryTimer;
-const nativeUiInstanceId = /^[0-9a-f-]{36}$/.test(process.env.COOP_NATIVE_UI_INSTANCE_ID || '') ? process.env.COOP_NATIVE_UI_INSTANCE_ID : null;
+const nativeUiInstanceId = /^[0-9a-f-]{36}$/.test(process.env.PLEXUS_NATIVE_UI_INSTANCE_ID || '') ? process.env.PLEXUS_NATIVE_UI_INSTANCE_ID : null;
 let nativeLifecycleOperationId = null;
 let visibilityHistory = { status: enabled && peerMessageVisibility && peerHistoryVisibility ? 'pending' : 'disabled', count: 0 };
 let historyRestoreSession = null;
@@ -78,7 +78,7 @@ function persist() {
   registryTimer = setTimeout(() => {
     registryTimer = null;
     writing = writing.then(async () => { await writeFile(registryFile + '.tmp', lastSnapshot + '\n', 'utf8'); await rename(registryFile + '.tmp', registryFile); })
-      .catch(() => { lastSnapshot = ''; process.stderr.write('[Cooperation] Could not publish wrapper state.\n'); });
+      .catch(() => { lastSnapshot = ''; process.stderr.write('[Plexus] Could not publish wrapper state.\n'); });
   }, 100);
 }
 async function finishCompaction(status, extra = {}) {
@@ -94,7 +94,7 @@ const inputObserver = new JsonLineObserver(message => {
   if (nativeUiInstanceId && !nativeLifecycleOperationId && message.type === 'user') {
     const content = message.message?.content;
     const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(p => p.type === 'text').map(p => p.text).join('\n') : '';
-    nativeLifecycleOperationId = /^\[Cooperation native session:([0-9a-f-]{36})\]\n/.exec(text)?.[1] || null;
+    nativeLifecycleOperationId = /^\[Plexus native session:([0-9a-f-]{36})\]\n/.exec(text)?.[1] || null;
   }
   state.host(message); quotaJournal?.observe(state); persist();
 });
@@ -190,7 +190,7 @@ child.stdout.on('end', () => { contextChannel.end(forwardOutput); peerVisibility
 process.stdout.on('drain', () => child.stdout.resume());
 process.stdout.on('error', () => child.kill());
 child.stderr.pipe(process.stderr);
-child.once('error', async () => { process.stderr.write('[Cooperation] Failed to launch the original Claude process.\n'); await cleanup(1); });
+child.once('error', async () => { process.stderr.write('[Plexus] Failed to launch the original Claude process.\n'); await cleanup(1); });
 child.once('close', (code, signal) => { void cleanup(code ?? (signal ? 1 : 0)); });
 for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { child.kill(); setTimeout(() => process.exit(1), 3000).unref(); });
 async function cleanup(code) {
@@ -380,5 +380,5 @@ if (enabled) {
     server.requestTimeout = 150000;
     await listenLoopback(server);
     endpoint = `http://127.0.0.1:${server.address().port}`; persist();
-  } catch { enabled = false; server?.close(); process.stderr.write('[Cooperation] Control endpoint unavailable; normal Claude transport continues.\n'); }
+  } catch { enabled = false; server?.close(); process.stderr.write('[Plexus] Control endpoint unavailable; normal Claude transport continues.\n'); }
 }

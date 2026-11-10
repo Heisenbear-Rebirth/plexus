@@ -7,7 +7,7 @@ import * as zlib from 'node:zlib';
 import { listClaudeSessions } from '../src/adapters/claude.mjs';
 import { IncrementalContextReader } from '../src/context-usage.mjs';
 import { persistedMap } from '../src/persisted-cache.mjs';
-import { CooperationService } from '../src/service.mjs';
+import { PlexusService } from '../src/service.mjs';
 
 async function scratch(t, prefix) {
   const base = path.join(process.cwd(), 'test'), root = await mkdtemp(path.join(base, prefix));
@@ -90,7 +90,7 @@ test('a compressed Codex rollout is read once, and a resumed plain rollout takes
 test('overlapping discovery requests share one scan per directory', async t => {
   const root = await scratch(t, '.discovery-fixture-'); let calls = 0;
   const adapter = { list: async () => { calls++; await new Promise(resolve => setTimeout(resolve, 30)); return { sessions: [], warnings: [] }; } };
-  const service = new CooperationService({ store: {}, root, adapters: { claude: adapter }, accessPolicy: { permits: () => true, assert: () => {} } });
+  const service = new PlexusService({ store: {}, root, adapters: { claude: adapter }, accessPolicy: { permits: () => true, assert: () => {} } });
   const directories = [{ path: root, recursive: false }];
   await Promise.all([service.sessions({ directories }), service.sessions({ directories }), service.sessions({ directories })]);
   assert.equal(calls, 1);

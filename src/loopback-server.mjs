@@ -2,10 +2,10 @@ import { randomInt } from 'node:crypto';
 
 // Fixed so external programs can keep one address. 47821 is IANA-unassigned
 // (47810-47999), above this machine family's custom ephemeral ranges and the
-// Fetch bad-port list. --port wins, then COOP_PORT; 0 means a random port.
+// Fetch bad-port list. --port wins, then PLEXUS_PORT; 0 means a random port.
 export const DEFAULT_PORT = 47821;
 export function servePort(option, env = process.env) {
-  const value = option ?? env.COOP_PORT;
+  const value = option ?? env.PLEXUS_PORT;
   if (value === undefined || value === '') return DEFAULT_PORT;
   const port = Number(value);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('端口必须是 0 到 65535 之间的整数。');

@@ -5,7 +5,7 @@ import { installationRoot, localEndpoint, sameDirectory } from '../opencode-brid
 import { readAccessPolicy } from '../access-policy.mjs';
 
 export function createOpenCodeAdapter({ root = installationRoot, timeout = 15000 } = {}) {
-  const folder = join(root, '.cooperation', 'opencode', 'instances');
+  const folder = join(root, '.plexus', 'opencode', 'instances');
   // Concurrent directory scans share one read of the registrations.
   let recordsRead = null;
   function records() { return recordsRead ||= readRecords().finally(() => { recordsRead = null; }); }

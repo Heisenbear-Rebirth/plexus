@@ -6,8 +6,8 @@ import { resolve } from 'node:path';
 for (const source of ['argument', 'environment', 'handshake']) {
   test(`OpenCode MCP ${source} cannot mask native plugin tools or accept a forged checkpoint`, async () => {
     const env = { ...process.env };
-    delete env.COOP_CLIENT;
-    if (source === 'environment') env.COOP_CLIENT = 'opencode';
+    delete env.PLEXUS_CLIENT;
+    if (source === 'environment') env.PLEXUS_CLIENT = 'opencode';
     const script = `import {startMcp} from './src/mcp.mjs';startMcp(${JSON.stringify({ root: resolve('.'), ...(source === 'argument' ? { client: 'opencode' } : {}) })});`;
     const child = spawn(process.execPath, ['--input-type=module', '--eval', script], { cwd: resolve('.'), env, windowsHide: true });
     let output = '', errors = '';
@@ -23,7 +23,7 @@ for (const source of ['argument', 'environment', 'handshake']) {
     assert.equal(code, 0, errors);
     const result = new Map(output.trim().split('\n').map(line => { const r = JSON.parse(line); return [r.id, r.result]; }));
     assert.deepEqual(result.get(2).tools, []);
-    assert.match(result.get(1).instructions, /cooperation_context_checkpoint/);
+    assert.match(result.get(1).instructions, /plexus_context_checkpoint/);
     assert.equal(result.get(3).isError, true);
     assert.match(result.get(3).content[0].text, /原生/);
     assert.doesNotMatch(result.get(3).content[0].text, /ENOENT|阶段回执|from/);

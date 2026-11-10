@@ -48,7 +48,7 @@ internal static class ClaudeWrapperLauncher {
             var output = Task.Run(() => { try { Pump(child.StandardOutput.BaseStream, Console.OpenStandardOutput()); } catch (IOException) {} });
             var error = Task.Run(() => { try { Pump(child.StandardError.BaseStream, Console.OpenStandardError()); } catch (IOException) {} });
             child.WaitForExit(); Task.WaitAll(output, error); return child.ExitCode;
-        } catch (Exception) { Console.Error.WriteLine("[Cooperation] Wrapper launcher failed. Check project launcher paths and Windows process permissions."); return 1; }
+        } catch (Exception) { Console.Error.WriteLine("[Plexus] Wrapper launcher failed. Check project launcher paths and Windows process permissions."); return 1; }
         finally { if (job != IntPtr.Zero) CloseHandle(job); if (child != null) child.Dispose(); }
     }
 }

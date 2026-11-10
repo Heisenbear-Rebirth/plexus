@@ -4,7 +4,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ManagementStore, sessionKey } from './management-store.mjs';
-import { CooperationService } from './service.mjs';
+import { PlexusService } from './service.mjs';
 import { validateDirectory } from './directory-service.mjs';
 import { parseAddress, publicSession } from './address.mjs';
 import { POLICY_DEFAULTS } from './context-policy.mjs';
@@ -21,10 +21,11 @@ import { listenLoopback, DEFAULT_PORT } from './loopback-server.mjs';
 import { publicSessionHook } from './session-hooks.mjs';
 import { persistTranscriptCache } from './adapters/claude.mjs';
 import { persistArchiveUsage } from './context-usage.mjs';
+import { migrateLegacyData, LEGACY_DATA } from './data-directory.mjs';
 
 export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1', defaultDirectory = root, codexContext, adapters, bridgeProbe, runtimeFactory, lifecycleDirectories, startMonitoring = true, portFallback = false, onShutdown = () => {} } = {}) {
   if (host !== '127.0.0.1') throw new Error('管理台仅允许监听 127.0.0.1。');
-  const dataDirectory = join(root, '.cooperation');
+  const legacy = migrateLegacyData(root), dataDirectory = join(root, '.plexus');
   // Discovery then reads only appended transcript bytes, even after a restart.
   persistTranscriptCache(join(dataDirectory, 'cache', 'claude-transcripts.json')); persistArchiveUsage(join(dataDirectory, 'cache', 'codex-archives.json'));
   await mkdir(dataDirectory, { recursive: true });
@@ -47,6 +48,8 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
   };
   try {
     store.acquireManager(); await store.migrateLegacy();
+    if (legacy.migrated) store.relocateActiveHandoffs(join(root, LEGACY_DATA), dataDirectory);
+    if (legacy.leftovers.length) store.warnings.push(`旧数据目录 ${LEGACY_DATA} 中有 ${legacy.leftovers.length} 项与 .plexus 中的同名，未移动：${legacy.leftovers.slice(0, 5).join('、')}。核对后可以删除。`);
     if (!store.directories().length) store.saveDirectory(await validateDirectory(defaultDirectory));
     await wrapperSettings.synchronize(store.directories(), knownWrapperPaths(), keepActiveClaudeControl);
   } catch (error) { store.close(); throw error; }
@@ -56,7 +59,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
   const publish = (event, data) => { for (const response of streams) response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
   const codexBridge = !adapters ? await new CodexBridgeConnection({ root, context: codexContext, probe: bridgeProbe, onUpdate: state => publish('bridge', state) }).init() : null;
   const bridgeStatus = () => codexBridge?.status() || { connected: Boolean(codexContext?.pipePath && codexContext?.callerThreadId), state: 'unmanaged' };
-  const service = new CooperationService({ store, root, codexContext, codexBridge, adapters, lifecycleDirectories, runtimeFactory, onMessage: (id) => {
+  const service = new PlexusService({ store, root, codexContext, codexBridge, adapters, lifecycleDirectories, runtimeFactory, onMessage: (id) => {
     for (const response of streams) response.write(`event: message\ndata: ${JSON.stringify({ id })}\n\n`);
   } });
   const monitor = new ContextMonitor({ store, service, runtimeFactory, onUpdate: session => publish('management', { client: session.client, id: session.id }),
@@ -89,7 +92,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
     try {
       if (url.pathname === '/api/service/status' || url.pathname === '/api/service/stop') {
         if (!equal(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: '需要本项目的管理服务凭据。' });
-        if (request.method === 'GET' && url.pathname === '/api/service/status') return json(response, 200, { service: 'cooperation', root, pid: process.pid, startedAt: connection.startedAt, closing: closed, codexBridge: bridgeStatus() });
+        if (request.method === 'GET' && url.pathname === '/api/service/status') return json(response, 200, { service: 'plexus', root, pid: process.pid, startedAt: connection.startedAt, closing: closed, codexBridge: bridgeStatus() });
         if (request.method === 'POST' && url.pathname === '/api/service/stop') {
           const expected = await body(request);
           if (expected.pid !== process.pid || expected.startedAt !== connection.startedAt) return json(response, 409, { error: '管理服务实例已改变，请重新运行关闭脚本。' });
@@ -100,7 +103,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
         return json(response, 405, { error: 'Method not allowed' });
       }
       if (request.method === 'GET' && url.pathname === '/api/config') {
-        return json(response, 200, { version: '0.2.0', bootId: store.restartConfirmation.bootId, installationDirectory: root, defaultDirectory, directories: await directoryRecords(), policyDefaults: POLICY_DEFAULTS, csrfToken,
+        return json(response, 200, { version: '0.3.0', bootId: store.restartConfirmation.bootId, installationDirectory: root, defaultDirectory, directories: await directoryRecords(), policyDefaults: POLICY_DEFAULTS, csrfToken,
           lifecycle: service.lifecycle.capabilities(), lifecycleDirectories: service.lifecycle.directories,
           claudePeerCrossModeAccept: (await readWrapperDirectories(root)).peerCrossModeAccept === true,
           bridge: { codex: bridgeStatus().connected, codexStatus: bridgeStatus() }, warnings: store.warnings });
@@ -112,7 +115,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
       if (url.pathname === '/api/prompt-settings') {
         if (request.method === 'GET') return json(response, 200, { ...await prompts.read(), defaults: defaultPromptValues(), samples: promptPreviewSamples(root) });
         if (request.method !== 'POST') return json(response, 405, { error: 'Method not allowed' });
-        if (!equal(request.headers['x-coop-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面修改提示词。' });
+        if (!equal(request.headers['x-plexus-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面修改提示词。' });
         const input = await body(request);
         if (Object.keys(input).some(k => !['values', 'expectedRevision'].includes(k))) throw Error('不支持的提示词设置字段。');
         const saved = await prompts.save(input.values, input.expectedRevision);
@@ -121,7 +124,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
         return json(response, 200, saved);
       }
       if (request.method === 'POST' && url.pathname === '/api/sessions') {
-        if (!equal(request.headers['x-coop-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面查询会话。' });
+        if (!equal(request.headers['x-plexus-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面查询会话。' });
         const query = await body(request), maxAgeMs = Math.min(15000, Math.max(0, Number(query.maxAgeMs) || 0));
         const result = await service.sessions(query.directoryIds ? { directories: scope(query.directoryIds), maxAgeMs } : query);
         const wrapper = await readWrapperDirectories(root);
@@ -132,7 +135,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
       if (request.method === 'GET' && url.pathname === '/api/directories') return json(response, 200, { directories: await directoryRecords() });
       if (request.method === 'GET' && url.pathname === '/api/groups') return json(response, 200, { groups: groups.list() });
       if (request.method === 'POST' && ['/api/groups', '/api/groups/remove'].includes(url.pathname)) {
-        if (!equal(request.headers['x-coop-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面编辑分组。' });
+        if (!equal(request.headers['x-plexus-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面编辑分组。' });
         const input = await body(request);
         let group;
         if (url.pathname.endsWith('/remove')) groups.remove(input);
@@ -154,7 +157,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
         }) });
       }
       if (request.method === 'POST' && ['/api/restart-confirmation', '/api/directories', '/api/directories/remove', '/api/directories/claude-control', '/api/claude-peer-inbound', '/api/session-hook', '/api/policies', '/api/runtime', '/api/cycles/action', '/api/messages/resolve', '/api/queue/release'].includes(url.pathname)) {
-        if (!equal(request.headers['x-coop-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面操作。' });
+        if (!equal(request.headers['x-plexus-ui'], csrfToken)) return json(response, 403, { error: '请从本地管理页面操作。' });
         const input = await body(request);
         if (url.pathname === '/api/restart-confirmation') {
           const restartConfirmations = store.restartConfirmation.decide(input);
@@ -292,7 +295,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
       }
       if (request.method === 'POST' && ['/api/lifecycle', '/api/ui/lifecycle', '/api/opencode/lifecycle'].includes(url.pathname)) {
         const ui = url.pathname === '/api/ui/lifecycle';
-        if (ui ? !equal(request.headers['x-coop-ui'], csrfToken) : !equal(request.headers.authorization, `Bearer ${token}`)) return json(response, 403, { error: '会话操作需要本项目的有效身份。' });
+        if (ui ? !equal(request.headers['x-plexus-ui'], csrfToken) : !equal(request.headers.authorization, `Bearer ${token}`)) return json(response, 403, { error: '会话操作需要本项目的有效身份。' });
         let input = await body(request), origin;
         if (url.pathname === '/api/opencode/lifecycle') {
           input = await service.adapters.opencode.verifySender(input);
@@ -338,7 +341,7 @@ export async function startServer({ root, port = DEFAULT_PORT, host = '127.0.0.1
         // Only the default fixed port falls back; an explicit port must fail loudly.
         if (!portFallback || !['EADDRINUSE', 'EACCES'].includes(error.code)) throw error;
         await listenLoopback(server);
-        store.warnings.push(`固定端口 ${port} 已被其他程序占用，本次改用端口 ${server.address().port}。外部程序请用命令行 notify，或读取 .cooperation/connection.json 中的地址。`);
+        store.warnings.push(`固定端口 ${port} 已被其他程序占用，本次改用端口 ${server.address().port}。外部程序请用命令行 notify，或读取 .plexus/connection.json 中的地址。`);
       }
     }
   }

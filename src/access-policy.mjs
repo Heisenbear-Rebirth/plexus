@@ -36,7 +36,7 @@ async function loadAccessPolicy(root) {
   // Product policy configured by the operator only. Restrictions on a coding
   // agent's own file access must never be copied into this runtime denylist.
   let input;
-  try { input = JSON.parse(await readFile(join(root, '.cooperation', 'access-policy.json'), 'utf8')); }
+  try { input = JSON.parse(await readFile(join(root, '.plexus', 'access-policy.json'), 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return new DirectoryAccessPolicy(); throw error; }
   if (input.version !== 1) throw new Error('Unsupported directory access policy.');
   return new DirectoryAccessPolicy(input.protectedDirectories);

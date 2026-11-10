@@ -9,9 +9,9 @@ import { startServer } from '../src/http-server.mjs';
 import { readRestartEvidence, restartPlan } from '../src/maintenance-recovery.mjs';
 
 async function fixture(t, { working = false } = {}) {
-  const parent = resolve('.cooperation/opencode-maintenance-tests'); await mkdir(parent, { recursive: true });
+  const parent = resolve('.plexus/opencode-maintenance-tests'); await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, 'case-'));
-  await mkdir(join(root, '.cooperation')); await writeFile(join(root, '.cooperation/session-lifecycle-cancelled.json'), '{}');
+  await mkdir(join(root, '.plexus')); await writeFile(join(root, '.plexus/session-lifecycle-cancelled.json'), '{}');
   const session = { id: 'ses_MaintenanceCaseABC123', directory: root, agent: 'build', model: { id: 'actual', providerID: 'fixture', variant: 'high' }, permission: [{ permission: '*', pattern: '*', action: 'ask' }] };
   const target = { id: session.id, client: 'opencode', cwd: root }, rows = [], calls = [], permission = [], children = [];
   let bridge, manager, busy = false, compactions = 0, interrupts = 0, losePrompt = false, failCompact = false, hangCompact = false, releaseCompact;

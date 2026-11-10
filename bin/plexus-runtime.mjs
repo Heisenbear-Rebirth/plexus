@@ -10,10 +10,10 @@ try {
   const target = parseAddress(value('--to') || '');
   runtime = createRuntime(target);
   const action = args[0];
-  if (!['status', 'context', 'prompt', 'interrupt'].includes(action)) throw new Error('Use: coop-runtime.mjs status|context|prompt|interrupt --to client:ID');
+  if (!['status', 'context', 'prompt', 'interrupt'].includes(action)) throw new Error('Use: plexus-runtime.mjs status|context|prompt|interrupt --to client:ID');
   if (action === 'status') console.log(JSON.stringify(await runtime.status(), null, 2));
   else if (action === 'context') {
-    if (target.client !== 'claude') throw new Error('Use coop-context.mjs for Codex recorded context.');
+    if (target.client !== 'claude') throw new Error('Use plexus-context.mjs for Codex recorded context.');
     console.log(JSON.stringify(await runtime.context(), null, 2));
   } else {
     const expected = JSON.parse(await readFile(value('--expected-file'), 'utf8'));

@@ -18,7 +18,7 @@
 
 | 能力 | 期望结果 | 需要独立确认 |
 | --- | --- | --- |
-| 创建新的原生会话 | 在获准目录和选定客户端中创建会话，返回原生ID、Cooperation地址，来源会话可直接继续通信。 | 落库、真实独立会话身份、模型/agent/权限选择、后端归属、可发现/可发送、原生UI可见。 |
+| 创建新的原生会话 | 在获准目录和选定客户端中创建会话，返回原生ID、Plexus地址，来源会话可直接继续通信。 | 落库、真实独立会话身份、模型/agent/权限选择、后端归属、可发现/可发送、原生UI可见。 |
 | 连接/加载已有会话 | 使用既有ID，让当前未加载或离线会话在正确原生后端可用。 | 不产生副本、目录/实例匹配、原设置是否保留、是否需要宿主运行、是否抢焦点/打断原任务。 |
 
 相关状态不能合并成一个布尔“已连接”：
@@ -63,10 +63,10 @@
 
 **已知代码事实：**
 
-- v1.18.30本机规范在 `.cooperation/opencode/openapi.json`。前一阶段隔离脚本已使用 `POST /session` 创建专用测试会话，因此原生API可创建这一事实已有证据；**产品工具/API尚未接入创建功能**。
+- v1.18.30本机规范在 `.plexus/opencode/openapi.json`。前一阶段隔离脚本已使用 `POST /session` 创建专用测试会话，因此原生API可创建这一事实已有证据；**产品工具/API尚未接入创建功能**。
 - 正式插件 `plugins/opencode.mjs` 使用OpenCode给出的SDK client，具备同后端/目录绑定和ToolContext来源核验。
 - `src/opencode-bridge.mjs`当前只提供list/find/status/send/identity，未开放create/connect。原生prompt_async可启动已存在会话的推理，但发送不是无副作用“纯连接”。
-- 当前list/find主动过滤 `parentID` 非空、archived会话。Cooperation要创建可独立管理的会话时，应研究原生普通session与subagent的区别；不能简单设置parentID导致创建后被过滤。
+- 当前list/find主动过滤 `parentID` 非空、archived会话。Plexus要创建可独立管理的会话时，应研究原生普通session与subagent的区别；不能简单设置parentID导致创建后被过滤。
 - TUI与浏览器GUI已做通信可见性验收；桌面应用壳仍未实测。配置只在后端启动时加载；不能通过创建独立serve来声称原工作会话已接入。
 
 **下一步研究：** 在插件所处后端调用受支持的session.create，确认新会话的目录/model/agent/permission和默认自动压缩行为；返回ID到源会话；会话列表刷新、状态进入可发送及TUI/GUI定位如何实现。连接现有会话时先查目标归属，API可访问、开始推理、打开前端页面应分别表示。
@@ -75,7 +75,7 @@
 
 1. **只读恢复。** 使用HANDOFF最新快照作为比较点，查Git、manager实例、OpenCode注册；保持现有UI和未提交改动，不重跑历史原生验收。
 2. **建立能力表。** 三端分别列create、load/resume、send-ready、原生TUI/GUI可见、重开持久性，以及需要宿主运行的条件。每一格标注已有证据、待核对或不可用。
-3. **先定义语义。** 明确新会话属于独立原生会话，来源关系由Cooperation保存；模型/目录/权限等默认值须来自明确规则或原生设置，不能偷偷扩大授权。
+3. **先定义语义。** 明确新会话属于独立原生会话，来源关系由Plexus保存；模型/目录/权限等默认值须来自明确规则或原生设置，不能偷偷扩大授权。
 4. **逐端实现。** OpenCode已有同后端create的测试基础，可作为优先落地对象；Codex、Claude依据能力核对推进。排序是建议，不是用户指定三端优先级。
 5. **统一入口。** 为service增加独立生命周期编排，MCP/原生插件提供对应能力；同时接入管理页。接口名可以考虑create_session、connect_session，最终以项目设计为准。
 6. **隔离回归。** 先fake adapter覆盖状态机、权限、并发、幂等与未知结果；再在本项目专用会话做必要原生测试，保留原业务客户端。
@@ -87,14 +87,14 @@
 
 - 复用现有Codex/Claude原生身份检测、OpenCode ToolContext桥，不接受任意 `from`。
 - 用户想减少“手工新建/复制ID”的摩擦，能力可由agent在获准任务内使用；权限规则应明确限定目标客户端、目录、数量/并发或生命周期范围，避免无限递归创建。具体规则待设计，不硬编码未经确认的产品限制。
-- 在注册连接之前确认目标cwd，目录许可与递归展示是不同概念。当前OpenCode正式插件只允许Cooperation目录。
+- 在注册连接之前确认目标cwd，目录许可与递归展示是不同概念。当前OpenCode正式插件只允许Plexus目录。
 - 新会话初始维护策略建议保持默认关闭；能创建和通信不自动证明可压缩、可强停、可恢复。
 - 任务来源是协作委派，不自动拥有比发起会话/用户授权更高的权限；不通过启用其他工具或宽权限绕过原生确认。
 
 ### 持久化与幂等
 
 - 创建具有外部副作用，先保存操作意图、requestId/idempotencyKey、真实源会话、目标client/cwd，再调用原生接口。
-- 保存返回的原生ID、实例、Cooperation地址与创建结果。响应丢失可能已创建，必须记录unknown并核对；不得用新ID盲重试导致重复会话。
+- 保存返回的原生ID、实例、Plexus地址与创建结果。响应丢失可能已创建，必须记录unknown并核对；不得用新ID盲重试导致重复会话。
 - 同一幂等键必须绑定相同参数；并发请求串行化或排他持久化。管理服务重启仍能识别未确认创建。
 - 来源/新会话关系与分组关系分别记录。删除组不删除原生会话；失败或取消也不擅自清除已创建且可能已有工作的会话。
 - 重连应核验原生ID/cwd/实例，不能仅依赖PID或旧端口；无法确认归属时返回可审查状态。
@@ -124,12 +124,12 @@
 
 | 要解决的问题 | 文件 |
 | --- | --- |
-| 如何给agent加工具 | `src/mcp.mjs`、`bin/coop.mjs`、`src/client.mjs`、`plugins/opencode.mjs` |
+| 如何给agent加工具 | `src/mcp.mjs`、`bin/plexus.mjs`、`src/client.mjs`、`plugins/opencode.mjs` |
 | 如何确认真实来源 | `src/identity.mjs`、`src/opencode-bridge.mjs` 的sendMessage/identity、`src/http-server.mjs` 的/api/opencode/send |
 | 服务统一分派 | `src/service.mjs`、`src/runtime/factory.mjs` |
 | 为什么Codex必须手动点开 | `src/runtime/codex-runtime.mjs` 的refresh/owner-discovery；`src/runtime/codex-ipc.mjs` 的versions |
 | 为什么Claude必须有进程 | `src/runtime/claude-runtime.mjs` 的connect；`src/adapters/claude.mjs` 的liveRecords/sendClaudeMessage |
-| OpenCode原生create参考 | `.cooperation/opencode/openapi.json` 的/session POST；`.cooperation/opencode/integration-validation.mjs` 的专用session创建与权限设置 |
+| OpenCode原生create参考 | `.plexus/opencode/openapi.json` 的/session POST；`.plexus/opencode/integration-validation.mjs` 的专用session创建与权限设置 |
 | 发现过滤规则 | `src/adapters/codex.mjs` 的isUserSession；`src/opencode-bridge.mjs` 的find/list；`src/adapters/claude.mjs` |
 | 事务与不确定结果 | `src/management-store.mjs`、`src/session-mailbox.mjs`；OpenCode投递账本逻辑 |
 | 新会话加入分组 | `src/project-groups.mjs`、`public/ui-state.mjs`、`public/app.js`、`test/project-groups.test.mjs` |

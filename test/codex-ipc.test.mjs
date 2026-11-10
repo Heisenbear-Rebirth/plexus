@@ -20,7 +20,7 @@ function receiver() {
 test('a long native conversation snapshot above 32 MiB remains connected', () => {
   const h = receiver();
   // Native desktop snapshots include history; legitimate conversations exceed
-  // the old limit even though Cooperation only retains projected control state.
+  // the old limit even though Plexus only retains projected control state.
   const frame = encode({ type: 'broadcast', method: 'thread-stream-state-changed',
     params: { description: '研究记录', padding: 'x'.repeat(33 * 1024 * 1024) } });
   for (let offset = 0; offset < frame.length; offset += 64 * 1024) h.ipc.receive(frame.subarray(offset, offset + 64 * 1024));

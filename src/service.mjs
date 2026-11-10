@@ -19,7 +19,7 @@ import { CodexAccountQuota } from './codex-account-quota.mjs';
 import { accountQuotaBlocked } from './quota-state.mjs';
 import { CodexDeliveryReceipts } from './codex-delivery-receipts.mjs';
 
-export class CooperationService {
+export class PlexusService {
   constructor({ store, root, codexContext, codexBridge, onMessage = () => {}, adapters, lifecycleDirectories, runtimeFactory, accessPolicy } = {}) {
     this.accessPolicy = accessPolicy;
     this.store = store; this.root = root; this.codexContext = codexContext; this.codexBridge = codexBridge; this.onMessage = onMessage;

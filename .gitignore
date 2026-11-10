@@ -1,3 +1,5 @@
+.plexus/
+# Data directory used before the rename to Plexus
 .cooperation/
 node_modules/
 /opencode.json

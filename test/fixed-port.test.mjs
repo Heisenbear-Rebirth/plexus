@@ -9,9 +9,9 @@ import { startServer } from '../src/http-server.mjs';
 test('the manager uses one fixed default port unless the user chooses another', () => {
   assert.equal(DEFAULT_PORT, 47821);
   assert.equal(servePort(undefined, {}), 47821);
-  assert.equal(servePort('31000', { COOP_PORT: '32000' }), 31000, '--port wins over the environment');
-  assert.equal(servePort(undefined, { COOP_PORT: '32000' }), 32000);
-  assert.equal(servePort(undefined, { COOP_PORT: '0' }), 0, '0 keeps a random port');
+  assert.equal(servePort('31000', { PLEXUS_PORT: '32000' }), 31000, '--port wins over the environment');
+  assert.equal(servePort(undefined, { PLEXUS_PORT: '32000' }), 32000);
+  assert.equal(servePort(undefined, { PLEXUS_PORT: '0' }), 0, '0 keeps a random port');
   for (const bad of ['-1', '65536', '12.5', 'abc']) assert.throws(() => servePort(bad, {}), /端口/);
 });
 

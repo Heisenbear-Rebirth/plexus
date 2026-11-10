@@ -20,7 +20,7 @@ export class SessionLifecycle {
       connect: Boolean(this.adapters[client]), wakeHost: false, openNativeUi: false,
       detail: client === 'opencode' ? '使用已运行的原生后端创建或连接；原生窗口显示需单独打开。'
         : client === 'codex' ? '可核对已加载会话。当前 App Tools 创建接口未核实，未加载会话仍需原 App 打开。'
-          : '在 Cooperation 专用原生面板中创建或恢复，保留原生权限交互；新建需提供首条提示。',
+          : '在 Plexus 专用原生面板中创建或恢复，保留原生权限交互；新建需提供首条提示。',
     }]));
   }
   async execute(action, args, origin) {

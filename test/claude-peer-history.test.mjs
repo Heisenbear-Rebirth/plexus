@@ -31,7 +31,7 @@ test('history selects confirmed peers on the current branch and never rewrites t
   assert.equal(hash(await readFile(h.file)), before);
   assert.deepEqual((await h.load()).frames, result.frames);
 });
-test('malformed, non-Cooperation, missing and oversized history do not fabricate a delivery', async t => {
+test('malformed, non-Plexus, missing and oversized history do not fabricate a delivery', async t => {
   const h = await setup(t), start = h.entry(null), noEnvelope = h.peer(start.uuid);
   noEnvelope.message.content = 'external peer';
   await h.put([start, noEnvelope, h.entry(noEnvelope.uuid)]);

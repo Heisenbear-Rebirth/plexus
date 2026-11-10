@@ -154,8 +154,8 @@ test('Claude native replay acknowledgements settle only known queued inputs, not
 });
 
 async function fixture(t, client) {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'quota-test-'));
-  const store = await new ManagementStore(join(root, '.cooperation')).init();
+  const root = await mkdtemp(join(resolve('.plexus'), 'quota-test-'));
+  const store = await new ManagementStore(join(root, '.plexus')).init();
   const session = { client, id: randomUUID(), cwd: root, name: 'Quota fixture' };
   const state = { client, sessionId: session.id, cwd: root, connected: true, activity: 'quota_limited', instanceId: 'original-instance', activityRevision: 3,
     activeTurnId: null, latestTurn: { id: 'failed-turn', status: 'failed' }, lastCompletedTurnId: 'failed-turn', model: 'original-model', effort: 'high',
@@ -184,7 +184,7 @@ async function fixture(t, client) {
     controller.quotaRecovery.codexNextRead = 0;
   };
   t.after(async () => { await controller.close(); await service.mailbox.close(); store.close();
-    assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+    assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   return { root, store, session, state, runtime, monitor, service, controller, handler, sample, forcePoll, sent,
     record: () => store.getSetting(quotaSettingKey(session)), setUsed: n => { used = n; }, setOutcome: v => { resumedStatus = v; },
     setReadHook: f => { readHook = f; }, reads: () => reads, controls: () => controlCount,

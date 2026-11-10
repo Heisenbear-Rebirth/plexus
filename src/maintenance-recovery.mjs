@@ -107,7 +107,7 @@ export async function readRestartEvidence(cycle, sample, { root, configDir = pro
   if (!cycle.compactDispatched || !root || !boundary || stamp(cycle.compactIntentAt) === null) return result;
   let requested = null, completed = null, newerControl = false;
   try {
-    await scan(join(root, '.cooperation', 'claude-wrapper', 'compactions.jsonl'), record => {
+    await scan(join(root, '.plexus', 'claude-wrapper', 'compactions.jsonl'), record => {
       if (record?.sessionId !== cycle.session.id || stamp(record.at) === null || stamp(record.at) < stamp(cycle.compactIntentAt)) return;
       if (record.type === 'requested') { requested = record; completed = null; newerControl = false; }
       if (requested && record.type === 'finished' && record.requestId === requested.requestId) completed = record;

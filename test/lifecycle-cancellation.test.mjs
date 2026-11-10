@@ -10,7 +10,7 @@ test('Published cancellation marker disables lifecycle without local runtime fil
   await writeFile(join(root,'session-lifecycle-cancelled.json'),'{}');
   assert.equal(lifecycleEnabled(root),false);
 });
-async function fixture(t){const root=await mkdtemp(join(resolve('.'),'.lifecycle-disabled-'));await mkdir(join(root,'.cooperation'));await writeFile(join(root,'.cooperation/session-lifecycle-cancelled.json'),'{}');t.after(()=>rm(root,{recursive:true,force:true}));return root;}
+async function fixture(t){const root=await mkdtemp(join(resolve('.'),'.lifecycle-disabled-'));await mkdir(join(root,'.plexus'));await writeFile(join(root,'.plexus/session-lifecycle-cancelled.json'),'{}');t.after(()=>rm(root,{recursive:true,force:true}));return root;}
 test('Cancellation prevents native operations and intent writes, and hides management capabilities',async t=>{
   const root=await fixture(t);let calls=0;
   const lifecycle=new SessionLifecycle({root,store:{reserveLifecycle(){calls++;}},adapters:{opencode:{find(){calls++;},createSession(){calls++;}}}});

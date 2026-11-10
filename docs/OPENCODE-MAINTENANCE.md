@@ -2,7 +2,7 @@
 
 ## 2026-09-30 修复与实际链路复核
 
-- 共享 MCP 在 OpenCode 中的命名前缀会与原生插件工具重名。现在识别到 OpenCode 客户端后返回空 MCP 工具列表，保留原生 `cooperation_context_checkpoint` / `cooperation_send_message` 的 ToolContext 身份。旧 MCP 进程需重新连接或随 OpenCode 重启后生效。
+- 共享 MCP 在 OpenCode 中的命名前缀会与原生插件工具重名。现在识别到 OpenCode 客户端后返回空 MCP 工具列表，保留原生 `plexus_context_checkpoint` / `plexus_send_message` 的 ToolContext 身份。旧 MCP 进程需重新连接或随 OpenCode 重启后生效。
 - 显式重试恢复阶段时，使用重试前核对的当前轮次；成功投递后清除该重试编号，避免沿用交付阶段的旧编号。新的原生输入仍会阻止重试，不会重复压缩或提前放行队列。
 - 普通协作消息会显式继承原生后端已保存的模型、agent 和 variant，避免 `prompt_async` 省略 variant 时把思考强度清回默认值。旧会话从最近用户消息读取选择；界面尚未随消息提交的选择不属于后端已保存状态。
 
@@ -12,13 +12,13 @@
 
 最后重载插件并由原生用户消息保存 `max` 后，连续两条真实消息均保留模型、agent、variant和权限；原生发送工具的回信已在发起验收的Codex会话收到。最终会话空闲、队列0、无活动维护；测试策略恢复为关闭，阈值50/80。记录为 `final-live.json`。
 
-真实 **1.18.30** 隔离后端配本地模拟模型，加载同名 MCP 与原生插件，软/硬维护及后续两条普通消息均通过；两条消息保留非默认 variant。证据位于本项目 `.cooperation/verification/opencode-repair-20260930/`：`full-tests.txt`、`reproduced-failures.json`、`soft-audit.json`、`hard-audit.json`、`native-final-coexistence-selection.json`。以下为早期实现记录。
+真实 **1.18.30** 隔离后端配本地模拟模型，加载同名 MCP 与原生插件，软/硬维护及后续两条普通消息均通过；两条消息保留非默认 variant。证据位于本项目 `.plexus/verification/opencode-repair-20260930/`：`full-tests.txt`、`reproduced-failures.json`、`soft-audit.json`、`hard-audit.json`、`native-final-coexistence-selection.json`。以下为早期实现记录。
 
 2026-09-18：软阈值和强阈值维护已实现，已通过隔离 OpenCode 1.18.30 后端验证。原生后端、工具执行和压缩记录是真实的，模型响应由本地模拟服务提供。没有对用户业务会话执行维护。
 
 ## 启用
 
-1. 更新 Cooperation 后，重新启动管理服务；等待当前原生任务结束，再重新启动所属 OpenCode 后端并打开原会话。两者都会缓存模块，仅刷新网页不足以升级。
+1. 更新 Plexus 后，重新启动管理服务；等待当前原生任务结束，再重新启动所属 OpenCode 后端并打开原会话。两者都会缓存模块，仅刷新网页不足以升级。
 2. 在管理台选中 OpenCode 会话，刷新状态。新版插件能提供维护状态时，“启用自动压缩”开关可用；旧插件或状态读取失败时保持不可启用。已启用的策略始终可以关闭。
 3. 按会话启用，默认关闭。默认空闲阈值50%、强停阈值80%，允许独立修改。模型容量或有效用量未知时等待统计。
 
@@ -26,9 +26,9 @@
 
 ## 流程
 
-- 软阈值：等当前任务空闲，创建维护cycle并锁住该目标的Cooperation消息队列。
+- 软阈值：等当前任务空闲，创建维护cycle并锁住该目标的Plexus消息队列。
 - 强阈值：确认当前实例、轮次和设置，提交一次中断；确认原轮次结束后再写交付文档。
-- 发送交付提示，接受 `cooperation_context_checkpoint` 的handoff回执，等待对应控制轮次结束。
+- 发送交付提示，接受 `plexus_context_checkpoint` 的handoff回执，等待对应控制轮次结束。
 - 调用原生 `summarize(auto:false)`，关联新增compaction消息与无错误的已完成summary回复，确认原生空闲。
 - 发送读取交付文档/恢复上下文提示，接受restored回执，再等待对应轮次结束。
 - 原本正在工作时发送一次继续提示，原本空闲时不额外续跑；之后释放FIFO中的协作消息。
@@ -37,7 +37,7 @@
 
 ## 持久化和恢复
 
-操作记录位于安装目录 `.cooperation/opencode/maintenance/<sessionID>/`。提交前保存请求ID、参数指纹、原生消息ID及意图，避免丢失响应后重复提交。记录不包含提示正文或阶段token。
+操作记录位于安装目录 `.plexus/opencode/maintenance/<sessionID>/`。提交前保存请求ID、参数指纹、原生消息ID及意图，避免丢失响应后重复提交。记录不包含提示正文或阶段token。
 
 压缩由插件持有原生长请求，manager短连接结束不代表压缩停止。manager/插件重启后回读原生消息与操作记录，只在证据充分时接续。没有回执的已提交控制提示不会自动重发；结果未知的压缩不会自动重做。
 
@@ -68,7 +68,7 @@
 | `src/maintenance-controller.mjs`、`src/maintenance-recovery.mjs` | 两阶段维护与重启接续 |
 | `src/checkpoint-service.mjs`、`src/http-server.mjs` | 文档/阶段/原生控制轮次校验，策略能力检查 |
 | `test/opencode-maintenance.test.mjs` | 隔离HTTP端到端与异常回归 |
-| `.cooperation/opencode-maintenance-native-result.json` | 最终原生后端结果；对应根目录 `opencode-maintenance-native-6XPQVE/` |
-| `.cooperation/opencode-maintenance-ui-result.json` | 浏览器结果；截图 `opencode-maintenance-ui-Djlxc3/desktop.png`、`mobile.png` |
+| `.plexus/opencode-maintenance-native-result.json` | 最终原生后端结果；对应根目录 `opencode-maintenance-native-6XPQVE/` |
+| `.plexus/opencode-maintenance-ui-result.json` | 浏览器结果；截图 `opencode-maintenance-ui-Djlxc3/desktop.png`、`mobile.png` |
 
-备份：`.cooperation/backups/opencode-maintenance-1789731680680/`（19文件）和 `opencode-maintenance-1789733593380/`（README/VALIDATION）。源码未提交；真实manager和用户OpenCode后端本轮未重启或部署。
+备份：`.plexus/backups/opencode-maintenance-1789731680680/`（19文件）和 `opencode-maintenance-1789733593380/`（README/VALIDATION）。源码未提交；真实manager和用户OpenCode后端本轮未重启或部署。

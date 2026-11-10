@@ -29,7 +29,7 @@ export function setupSessionHook({ post, toast, copy, getConfig }) {
     const warning = hookWarning(session, getConfig()); $('hook-warning').textContent = warning; $('hook-warning').hidden = !warning;
     if (hook) {
       body.append(node('p', 'small', hook.enabled ? `已开启 · 已调用 ${hook.uses} 次 · 最近：${when(hook.lastUsedAt)}` : '已停用：使用该密钥的调用会被拒绝。'),
-        block('接口密钥', hook.key, '可放进外部程序的配置或环境变量 COOP_HOOK_KEY。'),
+        block('接口密钥', hook.key, '可放进外部程序的配置或环境变量 PLEXUS_HOOK_KEY。'),
         block('命令行调用（推荐）', hook.command, '服务重启后仍然可用；也可用 --file 发送文件内容。'),
         block('HTTP 调用', httpExample(hook), hook.http.note));
     } else if (!busy) body.append(node('p', 'small muted', '尚未开启。开启后生成本会话专用的密钥。'));

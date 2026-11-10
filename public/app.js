@@ -64,11 +64,11 @@ async function request(path, options = {}) {
   if (!response.ok) throw Object.assign(new Error(data.error || '请求失败'), { status: response.status, policy: data.policy, notSubmitted: data.notSubmitted===true }); return data;
 }
 async function post(path, body, retried = false) {
-  try { return await request(path, {method:'POST',headers:{'Content-Type':'application/json','X-Coop-UI':state.config.csrfToken},body:JSON.stringify(body)}); }
+  try { return await request(path, {method:'POST',headers:{'Content-Type':'application/json','X-Plexus-UI':state.config.csrfToken},body:JSON.stringify(body)}); }
   catch (error) { if (error.status === 403 && !retried) { state.config = await request('/api/config'); return post(path,body,true); } throw error; }
 }
 async function copy(value) { try { await navigator.clipboard.writeText(value); toast('已复制'); } catch { toast('复制失败，请选中文本手动复制。'); } }
-function remember() { try { localStorage.setItem('cooperation-workspace-v2',JSON.stringify({mode:state.mode,picks:state.picks,address:state.selectedAddress,expanded:[...state.expanded],known:[...state.known]})); } catch {} }
+function remember() { try { localStorage.setItem('plexus-workspace-v2',JSON.stringify({mode:state.mode,picks:state.picks,address:state.selectedAddress,expanded:[...state.expanded],known:[...state.known]})); } catch {} }
 function ensureSelection() {
   if (!currentProject()) { state.picks[state.mode] = projects()[0]?.id || null; state.selectedAddress = null; }
   if (state.selectedAddress && !currentSession()) state.selectedAddress = null;
@@ -139,7 +139,7 @@ function renderNavigation() {
     if(!shown.length){
       const text=project.error?'目录暂不可访问':state.discoveryError?'会话发现失败，请刷新':!state.discoveryReady?'正在发现会话…':all.length?'已发现 '+all.length+' 个会话，当前筛选无匹配':state.mode==='custom'?'尚未选择成员':'尚未发现原生会话';
       list.append(el('p','nav-empty',text));
-      if(all.length&&(query||state.connectedOnly))list.append(button('显示全部会话','text-button reset-filter',()=>{$('session-search').value='';state.connectedOnly=false;try{localStorage.setItem('cooperation-connected-only-v1','false');}catch{}renderNavigation();renderProjectOverview();updateScope();}));
+      if(all.length&&(query||state.connectedOnly))list.append(button('显示全部会话','text-button reset-filter',()=>{$('session-search').value='';state.connectedOnly=false;try{localStorage.setItem('plexus-connected-only-v1','false');}catch{}renderNavigation();renderProjectOverview();updateScope();}));
       else if(state.discoveryError||project.error)list.append(button('重新发现','text-button reset-filter',()=>void loadSessions(true)));
       else if(state.discoveryReady&&state.mode==='directories')list.append(button('OpenCode 接入说明','text-button reset-filter',()=>showConnectionHelp('opencode',project.id)));
     }
@@ -306,7 +306,7 @@ function refreshCards(){
   }
 }
 let lifecycleDraft = null;
-const lifecycleStorage = 'cooperation-pending-session-operation-v1';
+const lifecycleStorage = 'plexus-pending-session-operation-v1';
 function lifecycleCapabilities(){
   const client=$('lifecycle-client').value;
   $('lifecycle-capability').textContent=lifecycleDraft?.action==='create'?state.config.lifecycle?.[client]?.detail||'能力待确认':'连接会保留原生 ID。Codex 和 Claude Code 当前需已有原生实例接入。';
@@ -437,7 +437,7 @@ for(const tab of ['overview','messages'])$('tab-'+tab).addEventListener('click',
 document.querySelector('.workspace-tabs').addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const tab=e.key==='Home'?'overview':e.key==='End'?'messages':state.tab==='overview'?'messages':'overview';setTab(tab);$('tab-'+tab).focus();}});
 $('session-search').addEventListener('input',renderNavigation);$('refresh-all').addEventListener('click',async e=>{const target=e.currentTarget;target.disabled=true;try{await refreshMaintenanceView();await loadBridge(true);await loadSessions(true);}catch(error){toast(error.message);}finally{target.disabled=false;}});
 $('collapse-all').addEventListener('click',()=>{for(const p of projects())state.expanded.delete(state.mode+':'+p.id);$('session-search').value='';remember();renderNavigation();});
-$('connected-only').addEventListener('click',()=>{state.connectedOnly=!state.connectedOnly;try{localStorage.setItem('cooperation-connected-only-v1',String(state.connectedOnly));}catch{}renderNavigation();if(!state.selectedAddress)renderProjectOverview();updateScope();});
+$('connected-only').addEventListener('click',()=>{state.connectedOnly=!state.connectedOnly;try{localStorage.setItem('plexus-connected-only-v1',String(state.connectedOnly));}catch{}renderNavigation();if(!state.selectedAddress)renderProjectOverview();updateScope();});
 $('message-search').addEventListener('input',renderMessages);$('message-status').addEventListener('change',renderMessages);
 $('codex-connection').addEventListener('click',()=>showConnectionHelp('codex'));$('connection-dialog').addEventListener('close',()=>state.connectionHelp=null);
 $('connection-recheck').addEventListener('click',async e=>{const target=e.currentTarget;target.disabled=true;try{await loadBridge(true);await loadSessions(true);renderConnectionHelp();}finally{target.disabled=false;}});
@@ -464,7 +464,9 @@ let discoverTimer,monitorTimer,messageTimer,eventMonitorTimer,eventMessageTimer,
 function connectEvents(){state.events=new EventSource('/api/events');state.events.addEventListener('open',()=>{eventStreamOnline=true;setServiceOnline(true);void loadBridge();void loadMonitoring();void loadGroups();});state.events.addEventListener('error',()=>{eventStreamOnline=false;setServiceOnline(state.online);void checkServiceHealth();});state.events.addEventListener('bridge',e=>{try{renderBridge(JSON.parse(e.data));}catch{}});state.events.addEventListener('groups',()=>void loadGroups());state.events.addEventListener('management',()=>{if(!eventMonitorTimer)eventMonitorTimer=setTimeout(()=>{eventMonitorTimer=null;void loadMonitoring();},200);});state.events.addEventListener('message',()=>{clearTimeout(eventMessageTimer);eventMessageTimer=setTimeout(loadMessages,200);});state.events.addEventListener('sessions',()=>{clearTimeout(eventSessionsTimer);eventSessionsTimer=setTimeout(()=>void loadSessions(),300);});}
 window.addEventListener('pagehide',()=>{state.closed=true;state.events?.close();for(const t of [discoverTimer,monitorTimer,messageTimer,eventMonitorTimer,eventMessageTimer,eventSessionsTimer])clearTimeout(t);});
 try{
-  try{const saved=JSON.parse(localStorage.getItem('cooperation-workspace-v2'));if(saved){state.mode=saved.mode==='custom'?'custom':'directories';state.picks=saved.picks||state.picks;state.selectedAddress=saved.address||null;state.expanded=new Set(saved.expanded||[]);state.known=new Set(saved.known||[]);}state.connectedOnly=localStorage.getItem('cooperation-connected-only-v1')==='true';}catch{}
+  // Page preferences saved before the rename to Plexus move to the new keys once.
+  try{for(const name of ['workspace-v2','connected-only-v1','pending-session-operation-v1']){const old=localStorage.getItem('cooperation-'+name);if(old!==null&&localStorage.getItem('plexus-'+name)===null)localStorage.setItem('plexus-'+name,old);localStorage.removeItem('cooperation-'+name);}}catch{}
+  try{const saved=JSON.parse(localStorage.getItem('plexus-workspace-v2'));if(saved){state.mode=saved.mode==='custom'?'custom':'directories';state.picks=saved.picks||state.picks;state.selectedAddress=saved.address||null;state.expanded=new Set(saved.expanded||[]);state.known=new Set(saved.known||[]);}state.connectedOnly=localStorage.getItem('plexus-connected-only-v1')==='true';}catch{}
   state.config=await request('/api/config');$('version').textContent='v'+state.config.version;state.directories=state.config.directories||[];state.bridge=state.config.bridge?.codexStatus;await loadSessions(true);renderBridge(state.bridge);connectEvents();setMobileNavigation(false,{animate:false});
   discoverTimer=setInterval(loadSessions,15000);monitorTimer=setInterval(loadMonitoring,5000);messageTimer=setInterval(loadMessages,10000);
 }catch(error){setError('global-error','无法连接本地管理服务：'+error.message);$('connection-label').textContent='服务未连接';}

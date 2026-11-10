@@ -1,6 +1,6 @@
 # 自定义消息与维护提示词
 
-在管理页右上角打开 **提示词设置**。设置作用于此管理台管理的所有项目，保存在安装目录的 `.cooperation/prompt-settings.json`；不会修改原生客户端的全局配置。
+在管理页右上角打开 **提示词设置**。设置作用于此管理台管理的所有项目，保存在安装目录的 `.plexus/prompt-settings.json`；不会修改原生客户端的全局配置。
 
 ## 可编辑内容
 
@@ -37,4 +37,4 @@
 
 隔离 Chrome 在桌面及 390px 手机视口验证编辑、预览、保存、刷新、清空提示、恢复默认、冲突处理和无横向溢出，页面错误为 0。隔离真实 OpenCode 1.18.30 后端配本地模拟模型完成自定义提示词的软/硬维护与后续消息投递；每轮一次压缩、两次原生回执，强阈值流程按条件发送自定义继续提示。
 
-本机记录：`.cooperation/verification/prompt-settings-full-tests.txt`、`prompt-settings-browser.json`、`prompt-settings-native.json` 和 `prompt-settings-deployment.json`。本次验证没有向用户业务会话发送自定义测试提示。
+本机记录：`.plexus/verification/prompt-settings-full-tests.txt`、`prompt-settings-browser.json`、`prompt-settings-native.json` 和 `prompt-settings-deployment.json`。本次验证没有向用户业务会话发送自定义测试提示。

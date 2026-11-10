@@ -7,8 +7,8 @@ import { ContextMonitor } from '../src/context-monitor.mjs';
 import { ManagementStore, sessionKey } from '../src/management-store.mjs';
 
 for (const pausedState of ['needs_attention', 'user_intervened']) test(`monitor refreshes ${pausedState} sessions without resuming maintenance, even when discovery omits them`, async t => {
-  const root = await mkdtemp(join(resolve('.cooperation'), 'monitor-paused-'));
-  const store = await new ManagementStore(join(root, '.cooperation')).init();
+  const root = await mkdtemp(join(resolve('.plexus'), 'monitor-paused-'));
+  const store = await new ManagementStore(join(root, '.plexus')).init();
   const session = { client: 'opencode', id: randomUUID(), cwd: root };
   const cycle = store.createCycle({ session, state: pausedState, previousState: 'restoring', reason: '等待人工检查' });
   store.saveSnapshot(session, { session, runtime: { connected: false, activity: 'offline' } });
@@ -16,7 +16,7 @@ for (const pausedState of ['needs_attention', 'user_intervened']) test(`monitor 
   const monitor = new ContextMonitor({ store, service: { sessions: async () => ({ sessions: [] }) },
     runtimeFactory: () => ({ status: async () => { reads++; return { connected, activity: connected ? 'idle' : 'offline', usage: {} }; },
       sendControl() { assert.fail('Paused maintenance must not submit control messages'); }, close() {} }) });
-  t.after(async () => { monitor.close(); store.close(); assert.ok(root.startsWith(resolve('.cooperation') + sep)); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { monitor.close(); store.close(); assert.ok(root.startsWith(resolve('.plexus') + sep)); await rm(root, { recursive: true, force: true }); });
   await monitor.observeAll();
   assert.equal(store.getSnapshot(session).runtime.connected, true);
   await monitor.observeAll(); assert.equal(reads, 1, 'paused sessions share observation throttling');

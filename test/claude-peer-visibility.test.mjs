@@ -24,17 +24,17 @@ test('peer projection preserves native object, provenance, UUID and replay ident
   const raw = peer(), before = structuredClone(raw), shown = visiblePeerMessage(raw, session);
   assert.deepEqual(raw, before); assert.equal(shown.isSynthetic, false);
   assert.equal(shown.uuid, raw.uuid); assert.equal(shown.isReplay, true); assert.deepEqual(shown.origin, raw.origin);
-  assert.equal(shown.message.content, '【Cooperation 会话消息】\n' + raw.message.content);
+  assert.equal(shown.message.content, '【Plexus 会话消息】\n' + raw.message.content);
   assert.deepEqual(visiblePeerMessage(shown, session), shown);
   const blocks = { ...raw, message: { role: 'user', content: [{ type: 'text', text: raw.message.content }, { type: 'text', text: 'more' }] } };
   const result = visiblePeerMessage(blocks, session);
   assert.equal(result.message.content[1], blocks.message.content[1]); assert.equal(result.isSynthetic, false);
 });
-test('a session-interface message is shown like any other Cooperation message', () => {
+test('a session-interface message is shown like any other Plexus message', () => {
   const id = randomUUID(), external = { client: 'external', id: '0123456789abcdef', name: '训练任务' };
   const raw = { ...peer(id), message: { role: 'user', content: messageEnvelope(external, '训练完成', id) } };
   const shown = visiblePeerMessage(raw, session);
-  assert.equal(shown.isSynthetic, false); assert.equal(shown.message.content, '【Cooperation 会话消息】\n' + raw.message.content);
+  assert.equal(shown.isSynthetic, false); assert.equal(shown.message.content, '【Plexus 会话消息】\n' + raw.message.content);
   for (const forged of [{ ...raw, uuid: randomUUID() },
     { ...raw, message: { role: 'user', content: raw.message.content + '\n' + peer(id).message.content } }])
     assert.equal(visiblePeerMessage(forged, session), forged, 'a mismatched ID or a second envelope stays native');
@@ -70,11 +70,11 @@ async function until(read) {
   throw Error('Fixture timed out');
 }
 for (const mode of ['enabled', 'env-disabled', 'config-disabled']) test(`busy wrapper output projection: ${mode}`, { skip: process.platform !== 'win32' }, async t => {
-  const parent = join(root, '.cooperation', 'peer-visibility-tests'); await mkdir(parent, { recursive: true });
+  const parent = join(root, '.plexus', 'peer-visibility-tests'); await mkdir(parent, { recursive: true });
   const dir = await mkdtemp(join(parent, 'case-')), id = randomUUID();
   await writeFile(join(dir, 'config.json'), JSON.stringify({ enabled: true, directories: [dir], peerMessageVisibility: mode !== 'config-disabled' }));
   const child = spawn(join(root, 'bin', 'claude-wrapper.exe'), [process.execPath, join(root, 'test', 'fixtures', 'claude-peer-visibility-child.mjs'), '--input-format', 'stream-json', '--output-format', 'stream-json', '--resume', id],
-    { cwd: dir, windowsHide: true, env: { ...process.env, CLAUDE_CONFIG_DIR: join(dir, 'claude'), COOP_WRAPPER_DATA_DIRECTORY: dir, COOP_PEER_MESSAGE_VISIBILITY: mode === 'env-disabled' ? '0' : '1', COOP_PEER_HISTORY_VISIBILITY: '0' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    { cwd: dir, windowsHide: true, env: { ...process.env, CLAUDE_CONFIG_DIR: join(dir, 'claude'), PLEXUS_WRAPPER_DATA_DIRECTORY: dir, PLEXUS_PEER_MESSAGE_VISIBILITY: mode === 'env-disabled' ? '0' : '1', PLEXUS_PEER_HISTORY_VISIBILITY: '0' }, stdio: ['pipe', 'pipe', 'pipe'] });
   const output = [], errors = []; child.stderr.on('data', c => errors.push(c.toString()));
   const exited = new Promise(r => child.once('close', r));
   createInterface({ input: child.stdout }).on('line', line => output.push(JSON.parse(line)));
@@ -129,7 +129,7 @@ test('history replays wait for a full native line and skip already displayed UUI
 
 
 for (const historyEnabled of [false, true]) test(`reopened wrapper history opt-in=${historyEnabled}: no flood, prompt or transcript edits`, { skip: process.platform !== 'win32' }, async t => {
-  const parent = join(root, '.cooperation', 'peer-visibility-tests'); await mkdir(parent, { recursive: true });
+  const parent = join(root, '.plexus', 'peer-visibility-tests'); await mkdir(parent, { recursive: true });
   const dir = await mkdtemp(join(parent, 'reopen-')), id = randomUUID(), configDir = join(dir, 'claude');
   t.after(async () => { assert.ok(resolve(dir).startsWith(resolve(parent) + sep)); await rm(dir, { recursive: true, force: true }); });
   await writeFile(join(dir, 'config.json'), JSON.stringify({ enabled: true, directories: [dir], ...(historyEnabled ? { peerHistoryVisibility: true } : {}) }));
@@ -143,7 +143,7 @@ for (const historyEnabled of [false, true]) test(`reopened wrapper history opt-i
   for (let restart = 0; restart < 3; restart++) {
     await rm(join(dir, 'replay.json'), { force: true });
     const child = spawn(join(root, 'bin', 'claude-wrapper.exe'), [process.execPath, join(root, 'test', 'fixtures', 'claude-peer-visibility-child.mjs'), '--input-format', 'stream-json', '--output-format', 'stream-json', '--resume', id],
-      { cwd: dir, windowsHide: true, env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, COOP_WRAPPER_DATA_DIRECTORY: dir, COOP_PEER_MESSAGE_VISIBILITY: '1', COOP_PEER_HISTORY_VISIBILITY: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      { cwd: dir, windowsHide: true, env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, PLEXUS_WRAPPER_DATA_DIRECTORY: dir, PLEXUS_PEER_MESSAGE_VISIBILITY: '1', PLEXUS_PEER_HISTORY_VISIBILITY: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
     const output = [], errors = []; const exited = new Promise(r => child.once('close', r));
     createInterface({ input: child.stdout }).on('line', line => output.push(JSON.parse(line)));
     child.stderr.on('data', b => errors.push(b.toString()));
@@ -179,7 +179,7 @@ for (const historyEnabled of [false, true]) test(`reopened wrapper history opt-i
   }
   const all = (await readFile(join(dir, 'input.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
   // Reading /status lets the wrapper query native settings; those reads are its own, never IDE input.
-  const own = all.filter(x => String(x.request_id || '').startsWith('cooperation-')), inputs = all.filter(x => !own.includes(x));
+  const own = all.filter(x => String(x.request_id || '').startsWith('plexus-')), inputs = all.filter(x => !own.includes(x));
   assert.ok(own.every(x => x.type === 'control_request' && ['get_settings', 'get_context_usage'].includes(x.request.subtype)));
   assert.deepEqual(inputs.map(x => x.type), ['control_request', 'control_request', 'control_request']);
   assert.ok(inputs.every(x => x.request.subtype === 'initialize'));

@@ -113,7 +113,7 @@ export class MaintenanceController {
         ...(replaceCycle ? { supersedesCycleId: replaceCycle.id } : {}),
         policy, wasWorkingAtTrigger: sample.decision.wasWorkingAtTrigger, quotaResumeHandoff: sample.decision.quotaResume === true, triggerRuntime: runtime, triggerUsage: sample.usage,
         originalTurnId: runtime.activeTurnId, contextEpoch: sample.usage.contextEpoch,
-        handoffPath: join(target.cwd, '.cooperation', 'handoffs', target.client, target.id, id + '.md'),
+        handoffPath: join(target.cwd, '.plexus', 'handoffs', target.client, target.id, id + '.md'),
         receiptHashes: { handoff: receiptHash(stageTokens.handoff), restored: receiptHash(stageTokens.restored) },
         deadlineAt: deadline(stageTimeout[state]), controlDispatched: false });
       // Tokens are private to this local service, never returned by a management API.
