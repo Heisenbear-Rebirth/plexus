@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { CodexIpc } from './codex-ipc.mjs';
+import { sharedCodexIpc } from './codex-ipc.mjs';
 import { normalizeDirectory } from '../directory-service.mjs';
 import { codexQuotaFailure, freshAvailableQuota, accountQuotaBlocked } from '../quota-state.mjs';
 import { codexPeerPermissionClass } from '../peer-permissions.mjs';
@@ -128,7 +128,7 @@ export function projectCodexState(s) {
 }
 
 export class CodexRuntime {
-  constructor(sessionId, { ipc = new CodexIpc(), timeoutMs = 5000, accountQuota } = {}) {
+  constructor(sessionId, { ipc = sharedCodexIpc(), timeoutMs = 5000, accountQuota } = {}) {
     if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error('Invalid Codex session ID.');
     this.id = sessionId.toLowerCase(); this.ipc = ipc; this.timeoutMs = timeoutMs; this.accountQuota = accountQuota;
     this.snapshot = null; this.ownerId = null; this.activityRevision = 0; this.waiters = new Set();
@@ -238,6 +238,8 @@ export class CodexRuntime {
   close() {
     if (this.ipc.connected && this.ownerId) { try { this.ipc.following(this.id, this.ownerId, false); } catch {} }
     this.onDisconnect(new Error('CODEX_IPC_CLOSED'));
-    this.ipc.off('broadcast', this.onBroadcast); this.ipc.off('disconnected', this.onDisconnect); this.ipc.close();
+    this.ipc.off('broadcast', this.onBroadcast); this.ipc.off('disconnected', this.onDisconnect);
+    // Other conversations keep using the shared connection.
+    if (!this.ipc.shared) this.ipc.close();
   }
 }

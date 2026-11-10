@@ -12,15 +12,15 @@ export class RestartConfirmation {
   get(session) { return this.store.getSetting(prefix + (typeof session === 'string' ? session : keyOf(session))); }
   save(record) { this.store.setSetting(prefix + keyOf(record.session), record); return record; }
   start() {
-    this.wasRestart = Boolean(this.store.getSetting('service-started')) || Boolean(this.store.db.prepare('SELECT 1 FROM snapshots LIMIT 1').get());
+    this.wasRestart = Boolean(this.store.getSetting('service-started')) || Boolean(this.store.sql('SELECT 1 FROM snapshots LIMIT 1').get());
     this.store.setSetting('service-started', { bootId: this.bootId, startedAt: this.startedAt });
     const sessions = new Map();
-    for (const row of this.store.db.prepare('SELECT data FROM snapshots').all()) {
+    for (const row of this.store.sql('SELECT data FROM snapshots').all()) {
       const sample = JSON.parse(row.data); if (sample.session) sessions.set(keyOf(sample.session), sample.session);
     }
     for (const p of this.store.policies()) sessions.set(keyOf(p.session), { ...sessions.get(keyOf(p.session)), ...p.session });
     for (const c of this.store.activeCycles()) sessions.set(keyOf(c.session), c.session);
-    const queued = this.store.db.prepare("SELECT target_key,data FROM outbox WHERE status<>'done'").all();
+    const queued = this.store.sql("SELECT target_key,data FROM outbox WHERE status<>'done'").all();
     for (const row of queued) { const s = JSON.parse(row.data).to; if (s) sessions.set(row.target_key, s); }
     for (const session of sessions.values()) {
       const runtime = this.store.getSnapshot(session)?.runtime;
@@ -82,9 +82,9 @@ export class RestartConfirmation {
     return !this.blocks(key) && this.seen.has(key) && this.store.getSnapshot(r.session)?.runtime?.connected === true;
   }
   assertAllowed(session) { if (this.blocks(session)) throw Error('项目已重启，请先在“待确认接续”中确认此会话。'); }
-  statuses() { return new Map(this.store.db.prepare('SELECT key, data FROM settings WHERE key LIKE ?').all(prefix + '%').map(row => [row.key.slice(prefix.length), JSON.parse(row.data)?.status || null])); }
+  statuses() { return new Map(this.store.sql('SELECT key, data FROM settings WHERE key LIKE ?').all(prefix + '%').map(row => [row.key.slice(prefix.length), JSON.parse(row.data)?.status || null])); }
   list() {
-    return this.store.db.prepare('SELECT data FROM settings WHERE key LIKE ?').all(prefix + '%').map(row => JSON.parse(row.data))
+    return this.store.sql('SELECT data FROM settings WHERE key LIKE ?').all(prefix + '%').map(row => JSON.parse(row.data))
       .filter(r => r.bootId === this.bootId && ['pending', 'deferred'].includes(r.status))
       .map(r => ({ id: r.id, bootId: r.bootId, revision: r.revision, status: r.status, session: r.session, work: r.work,
         connected: this.store.getSnapshot(r.session)?.runtime?.connected === true }));

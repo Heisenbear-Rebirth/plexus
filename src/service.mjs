@@ -5,6 +5,7 @@ import { parseAddress, publicSession, messageEnvelope, externalSender } from './
 import { listClaudeSessions, findClaudeSession } from './adapters/claude.mjs';
 import { listCodexSessions, findCodexSession, sendCodexMessage } from './adapters/codex.mjs';
 import { SessionMailbox } from './session-mailbox.mjs';
+import { sessionKey } from './management-store.mjs';
 import { sendVisibleClaudeMessage } from './runtime/claude-runtime.mjs';
 import { createRuntime } from './runtime/factory.mjs';
 import { createOpenCodeAdapter } from './adapters/opencode.mjs';
@@ -107,7 +108,7 @@ export class PlexusService {
       directories = directories.filter(d => access.permits(d.path, d.recursive));
       const results = await this.discover(directories.filter(d => d.enabled !== false), maxAgeMs);
       const merged = new Map(), warnings = [], directoryResults = [];
-      const selected = directories.filter(d => d.enabled !== false);
+      const selected = directories.filter(d => d.enabled !== false), queues = this.store.queueStates?.();
       for (const [i, result] of results.entries()) {
         const root = selected[i];
         if (result.status === 'rejected') { warnings.push(`${root.path}：${result.reason.message}`); directoryResults.push({ ...root, error: result.reason.message }); continue; }
@@ -115,8 +116,11 @@ export class PlexusService {
         for (const session of result.value.sessions) {
           const key = session.address; const old = merged.get(key);
           if (old) old.directoryIds.push(root.id);
-          else merged.set(key, { ...session, directoryIds: [root.id], policy: this.store.getPolicy?.(session) || null,
-            monitoring: this.store.getSnapshot?.(session) || null, cycle: this.publicCycle(this.store.activeCycle?.(session)), queueCount: this.store.queueCount?.(session) || 0, queueState: this.store.queueState?.(session) || {} });
+          else {
+            const queueState = queues ? queues.get(sessionKey(session)) || {} : this.store.queueState?.(session) || {};
+            merged.set(key, { ...session, directoryIds: [root.id], policy: this.store.getPolicy?.(session) || null, monitoring: this.store.getSnapshot?.(session) || null,
+              cycle: this.publicCycle(this.store.activeCycle?.(session)), queueCount: Object.values(queueState).reduce((sum, n) => sum + n, 0), queueState });
+          }
         }
       }
       return { directories: directoryResults, sessions: [...merged.values()].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')), warnings: [...new Set(warnings)] };

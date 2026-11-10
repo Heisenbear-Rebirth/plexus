@@ -24,8 +24,8 @@ export class ManagementStore {
   constructor(directory) { this.directory = directory; this.file = join(directory, 'management.sqlite'); this.warnings = []; this.managerToken = null; }
   async init() {
     await mkdir(this.directory, { recursive: true });
-    this.db = new DatabaseSync(this.file);
-    if (this.db.prepare('PRAGMA user_version').get().user_version > 1) { this.db.close(); this.db = null; throw new Error('管理数据库版本高于当前程序，请使用匹配版本。'); }
+    this.db = new DatabaseSync(this.file); this.statements = new Map(); this.settings = new Map();
+    if (this.sql('PRAGMA user_version').get().user_version > 1) { this.close(); throw new Error('管理数据库版本高于当前程序，请使用匹配版本。'); }
     this.db.exec(`PRAGMA busy_timeout=2000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_operations (key TEXT PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL);
@@ -44,11 +44,20 @@ export class ManagementStore {
       CREATE TABLE IF NOT EXISTS session_hooks (id TEXT PRIMARY KEY, session_key TEXT UNIQUE NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS cycles_by_session ON cycles(session_key);
       PRAGMA user_version=1;`);
-    this.snapshots = new Map(this.db.prepare('SELECT session_key, data FROM snapshots').all()
+    this.snapshots = new Map(this.sql('SELECT session_key, data FROM snapshots').all()
       .map(row => [row.session_key, { data: row.data, signature: stable(JSON.parse(row.data)) }]));
-    this.messageRevision = 0; this.cycleRevision = 0;
+    this.messageRevision = 0; this.cycleRevision = 0; this.loadPolicies();
     return this;
   }
+  // The maintenance tick reads policies, settings and cycles for every session
+  // every 2 s. Only this store writes them, so reads are served from memory and
+  // each statement is compiled once; on Windows every query also locks the files.
+  sql(text) {
+    let statement = this.statements.get(text);
+    if (!statement) this.statements.set(text, statement = this.db.prepare(text));
+    return statement;
+  }
+  loadPolicies() { this.policyTexts = new Map(this.sql('SELECT session_key, data FROM policies').all().map(row => [row.session_key, row.data])); }
   transaction(fn) {
     if (this.transactionDepth) return fn();
     this.db.exec('BEGIN IMMEDIATE'); this.transactionDepth = 1; this.snapshotWrites = new Set();
@@ -57,37 +66,41 @@ export class ManagementStore {
       this.db.exec('ROLLBACK'); this.messageRevision++; this.cycleRevision++;
       // A rolled-back snapshot write must be written again on the next sample.
       for (const key of this.snapshotWrites) { const entry = this.snapshots.get(key); if (entry) entry.signature = null; }
+      this.settings.clear(); this.loadPolicies();
       throw e;
     } finally { this.transactionDepth = 0; this.snapshotWrites = null; }
   }
-  event(type, data) { this.db.prepare('INSERT INTO events(type,at,data) VALUES(?,?,?)').run(type, now(), json(data)); }
-  getSetting(key) { return parse(this.db.prepare('SELECT data FROM settings WHERE key=?').get(key)); }
+  event(type, data) { this.sql('INSERT INTO events(type,at,data) VALUES(?,?,?)').run(type, now(), json(data)); }
+  getSetting(key) {
+    if (!this.settings.has(key)) this.settings.set(key, this.sql('SELECT data FROM settings WHERE key=?').get(key)?.data ?? null);
+    const text = this.settings.get(key); return text == null ? null : JSON.parse(text);
+  }
   reserveLifecycle(input) {
     return this.transaction(() => {
       this.assertManager();
-      const old = parse(this.db.prepare('SELECT data FROM session_operations WHERE key=?').get(input.key));
+      const old = parse(this.sql('SELECT data FROM session_operations WHERE key=?').get(input.key));
       if (old) return { ...old, fresh: false };
       // Unknown is durable before the first external call, including a crash in that call.
       const record = { ...input, state: 'unknown', createdAt: now(), updatedAt: now(), result: { status: 'unknown', detail: '操作意图已保存，原生结果待核对。' } };
-      this.db.prepare('INSERT INTO session_operations VALUES(?,?,?)').run(record.key, record.state, json(record));
+      this.sql('INSERT INTO session_operations VALUES(?,?,?)').run(record.key, record.state, json(record));
       return { ...record, fresh: true };
     });
   }
   finishLifecycle(key, result) {
     this.assertManager();
-    const record = parse(this.db.prepare('SELECT data FROM session_operations WHERE key=?').get(key));
+    const record = parse(this.sql('SELECT data FROM session_operations WHERE key=?').get(key));
     if (!record) throw new Error('生命周期操作不存在。');
     const next = { ...record, state: result.status, result, updatedAt: now() };
-    this.db.prepare('UPDATE session_operations SET state=?,data=? WHERE key=?').run(next.state, json(next), key);
+    this.sql('UPDATE session_operations SET state=?,data=? WHERE key=?').run(next.state, json(next), key);
     return next;
   }
-  setSetting(key, value) { this.db.prepare('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data').run(key, json(value)); }
+  setSetting(key, value) { const text = json(value); this.sql('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data').run(key, text); this.settings.set(key, text); }
   acquireManager() {
     return this.transaction(() => {
-      const existing = this.db.prepare('SELECT * FROM manager WHERE id=1').get();
+      const existing = this.sql('SELECT * FROM manager WHERE id=1').get();
       if (existing && managerProcessAlive(existing)) throw new Error('此项目已有管理服务实例；请使用现有服务。');
       this.managerToken = randomUUID();
-      this.db.prepare('INSERT INTO manager VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,pid=excluded.pid,epoch=excluded.epoch,started_at=excluded.started_at')
+      this.sql('INSERT INTO manager VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,pid=excluded.pid,epoch=excluded.epoch,started_at=excluded.started_at')
         .run(this.managerToken, process.pid, (existing?.epoch || 0) + 1, now());
       this.recoverInFlight();
       this.restartConfirmation = new RestartConfirmation(this); this.restartConfirmation.start();
@@ -95,10 +108,10 @@ export class ManagementStore {
     });
   }
   assertManager() {
-    if (this.managerToken && this.db.prepare('SELECT token FROM manager WHERE id=1').get()?.token !== this.managerToken) throw new Error('管理服务的所有权已改变。');
+    if (this.managerToken && this.sql('SELECT token FROM manager WHERE id=1').get()?.token !== this.managerToken) throw new Error('管理服务的所有权已改变。');
   }
   recoverInFlight() {
-    for (const row of this.db.prepare("SELECT * FROM outbox WHERE status='sending'").all()) {
+    for (const row of this.sql("SELECT * FROM outbox WHERE status='sending'").all()) {
       this.finishOutbox(row.id, { status: 'unknown', error: '上次服务退出前未确认发送结果，请核对原会话。' });
     }
     for (const cycle of this.activeCycles()) {
@@ -112,65 +125,66 @@ export class ManagementStore {
   }
   close() {
     if (!this.db) return;
-    if (this.managerToken) this.db.prepare('DELETE FROM manager WHERE id=1 AND token=?').run(this.managerToken);
-    this.db.close(); this.db = null;
+    if (this.managerToken) this.sql('DELETE FROM manager WHERE id=1 AND token=?').run(this.managerToken);
+    this.statements.clear(); this.db.close(); this.db = null;
   }
-  get messages() { return new Map(this.db.prepare('SELECT id,data FROM messages').all().map(row => [row.id, parse(row)])); }
-  getMessage(id) { return parse(this.db.prepare('SELECT data FROM messages WHERE id=?').get(id)); }
+  get messages() { return new Map(this.sql('SELECT id,data FROM messages').all().map(row => [row.id, parse(row)])); }
+  getMessage(id) { return parse(this.sql('SELECT data FROM messages WHERE id=?').get(id)); }
   create(message) {
-    this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?,?)').run(message.id, sessionKey(message.to), message.sequence || 0, message.status, message.createdAt, json(message));
+    this.sql('INSERT INTO messages VALUES(?,?,?,?,?,?)').run(message.id, sessionKey(message.to), message.sequence || 0, message.status, message.createdAt, json(message));
     this.messageRevision++;
   }
   update(id, patch) {
     const message = this.getMessage(id); if (!message) throw new Error('消息不存在。');
     Object.assign(message, patch);
-    this.db.prepare('UPDATE messages SET status=?,data=? WHERE id=?').run(message.status, json(message), id);
+    this.sql('UPDATE messages SET status=?,data=? WHERE id=?').run(message.status, json(message), id);
     this.messageRevision++;
     return message;
   }
   list({ directories = [], directory = '', recursive = false, q = '', client = 'all' } = {}) {
     const scopes = directories.length ? directories : directory ? [{ path: directory, recursive }] : [];
     const query = String(q).toLocaleLowerCase();
-    return this.db.prepare('SELECT data FROM messages ORDER BY created_at DESC').all().map(parse).filter(message => matchesDirectories(message, scopes)
+    return this.sql('SELECT data FROM messages ORDER BY created_at DESC').all().map(parse).filter(message => matchesDirectories(message, scopes)
       && (client === 'all' || message.from.client === client || message.to.client === client)
       && (!query || [message.text, message.from.displayAddress, message.to.displayAddress, message.id, message.error].some(v => String(v || '').toLocaleLowerCase().includes(query))));
   }
-  directories() { return this.db.prepare('SELECT data FROM directories ORDER BY rowid').all().map(parse); }
+  directories() { return this.sql('SELECT data FROM directories ORDER BY rowid').all().map(parse); }
   saveDirectory(directory) {
-    const old = parse(this.db.prepare('SELECT data FROM directories WHERE normalized=?').get(directory.normalized));
+    const old = parse(this.sql('SELECT data FROM directories WHERE normalized=?').get(directory.normalized));
     const record = { id: old?.id || directory.id || randomUUID(), label: directory.label || directory.path, recursive: false, enabled: true, ...old, ...directory };
-    this.db.prepare('INSERT INTO directories VALUES(?,?,?) ON CONFLICT(normalized) DO UPDATE SET data=excluded.data').run(record.id, record.normalized, json(record));
+    this.sql('INSERT INTO directories VALUES(?,?,?) ON CONFLICT(normalized) DO UPDATE SET data=excluded.data').run(record.id, record.normalized, json(record));
     return record;
   }
   removeDirectory(id) {
     const directory = this.directories().find(d => d.id === id); if (!directory) return;
     const active = this.activeCycles().filter(c => containsDirectory(c.session.cwd, directory.path, directory.recursive));
     if (active.length) throw new Error('该目录有正在维护的会话，请先完成或取消维护。');
-    this.db.prepare('DELETE FROM directories WHERE id=?').run(id);
+    this.sql('DELETE FROM directories WHERE id=?').run(id);
   }
-  getPolicy(session) { return parse(this.db.prepare('SELECT data FROM policies WHERE session_key=?').get(sessionKey(session))); }
+  getPolicy(session) { const text = this.policyTexts.get(sessionKey(session)); return text ? JSON.parse(text) : null; }
   savePolicy(session, patch = {}) {
     const old = this.getPolicy(session);
     const policy = validatePolicy({ enabled: false, ...POLICY_DEFAULTS[session.client], session: { client: session.client, id: session.id, hostId: session.hostId || 'local' },
       mode: 'observe', usageBasis: 'full-context-window', ...old, ...patch, revision: (old?.revision || 0) + 1 });
     if (!['observe', 'automatic'].includes(policy.mode)) throw new Error('未知的管理模式。');
-    this.db.prepare('INSERT INTO policies VALUES(?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(sessionKey(session), json(policy));
+    const key = sessionKey(session), text = json(policy);
+    this.sql('INSERT INTO policies VALUES(?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(key, text); this.policyTexts.set(key, text);
     this.event('policy_saved', policy); return policy;
   }
-  policies() { return this.db.prepare('SELECT data FROM policies').all().map(parse); }
+  policies() { return [...this.policyTexts.values()].map(text => JSON.parse(text)); }
   // Returns whether anything other than sampling times changed. Only such a
   // change is written; the latest sample is always served from memory.
   saveSnapshot(session, data) {
     this.restartConfirmation?.observe(data.session || session, data.runtime);
     const key = sessionKey(session), text = json(data), signature = stable(data), changed = this.snapshots.get(key)?.signature !== signature;
-    if (changed) { this.db.prepare('INSERT INTO snapshots VALUES(?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(key, text); this.snapshotWrites?.add(key); }
+    if (changed) { this.sql('INSERT INTO snapshots VALUES(?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(key, text); this.snapshotWrites?.add(key); }
     this.snapshots.set(key, { data: text, signature });
     return changed;
   }
   snapshotList() { return [...this.snapshots.values()].map(entry => JSON.parse(entry.data)); }
   // One external interface per session. The key is "hk_<id>.<secret>"; the id
   // is safe to log, the secret is compared in constant time.
-  sessionHook(session) { return parse(this.db.prepare('SELECT data FROM session_hooks WHERE session_key=?').get(sessionKey(session))); }
+  sessionHook(session) { return parse(this.sql('SELECT data FROM session_hooks WHERE session_key=?').get(sessionKey(session))); }
   saveSessionHook(session, { rotate = false, enabled, createdBy = 'ui' } = {}) {
     return this.transaction(() => {
       const key = sessionKey(session), old = this.sessionHook(session), at = now();
@@ -178,34 +192,40 @@ export class ManagementStore {
       if (!old || rotate) { hook.secret = randomBytes(24).toString('hex'); if (old) hook.rotatedAt = at; }
       if (typeof enabled === 'boolean') hook.enabled = enabled;
       hook.session = { client: session.client, id: session.id, name: session.name || hook.session?.name || null, cwd: session.cwd || hook.session?.cwd || null };
-      this.db.prepare('INSERT INTO session_hooks VALUES(?,?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(hook.id, key, json(hook));
+      this.sql('INSERT INTO session_hooks VALUES(?,?,?) ON CONFLICT(session_key) DO UPDATE SET data=excluded.data').run(hook.id, key, json(hook));
       if (!old || rotate || hook.enabled !== old.enabled) this.event('session_hook_saved', { id: hook.id, targetKey: key, enabled: hook.enabled, rotated: Boolean(old && rotate), createdBy });
       return hook;
     });
   }
   verifySessionHook(value) {
     const match = /^hk_([0-9a-f]{16})\.([0-9a-f]{48})$/.exec(typeof value === 'string' ? value.trim() : '');
-    const hook = match && parse(this.db.prepare('SELECT data FROM session_hooks WHERE id=?').get(match[1]));
+    const hook = match && parse(this.sql('SELECT data FROM session_hooks WHERE id=?').get(match[1]));
     if (!hook?.secret || !timingSafeEqual(Buffer.from(hook.secret), Buffer.from(match[2]))) return null;
     return hook;
   }
   touchSessionHook(hook) {
-    const current = parse(this.db.prepare('SELECT data FROM session_hooks WHERE id=?').get(hook.id)); if (!current) return;
-    this.db.prepare('UPDATE session_hooks SET data=? WHERE id=?').run(json({ ...current, uses: (current.uses || 0) + 1, lastUsedAt: now() }), hook.id);
+    const current = parse(this.sql('SELECT data FROM session_hooks WHERE id=?').get(hook.id)); if (!current) return;
+    this.sql('UPDATE session_hooks SET data=? WHERE id=?').run(json({ ...current, uses: (current.uses || 0) + 1, lastUsedAt: now() }), hook.id);
   }
   getSnapshot(session) { return parse(this.snapshots.get(typeof session === 'string' ? session : sessionKey(session))); }
-  mailbox(key) { this.db.prepare('INSERT OR IGNORE INTO mailboxes(session_key) VALUES(?)').run(key); return this.db.prepare('SELECT * FROM mailboxes WHERE session_key=?').get(key); }
-  activeCycle(session) { return parse(this.db.prepare("SELECT data FROM cycles WHERE session_key=? AND state NOT IN ('completed','cancelled')").get(sessionKey(session))); }
-  activeCycles() { return this.db.prepare("SELECT data FROM cycles WHERE state NOT IN ('completed','cancelled')").all().map(parse); }
-  cycle(id) { return parse(this.db.prepare('SELECT data FROM cycles WHERE id=?').get(id)); }
-  lastCycle(session) { return parse(this.db.prepare('SELECT data FROM cycles WHERE session_key=? ORDER BY rowid DESC LIMIT 1').get(sessionKey(session))); }
+  mailbox(key) { this.sql('INSERT OR IGNORE INTO mailboxes(session_key) VALUES(?)').run(key); return this.sql('SELECT * FROM mailboxes WHERE session_key=?').get(key); }
+  // Every cycle write bumps cycleRevision; until then these are served from memory.
+  activeCycleTexts() {
+    if (this.activeCycleCache?.revision !== this.cycleRevision) this.activeCycleCache = { revision: this.cycleRevision,
+      texts: new Map(this.sql("SELECT session_key, data FROM cycles WHERE state NOT IN ('completed','cancelled')").all().map(row => [row.session_key, row.data])) };
+    return this.activeCycleCache.texts;
+  }
+  activeCycle(session) { const text = this.activeCycleTexts().get(sessionKey(session)); return text ? JSON.parse(text) : null; }
+  activeCycles() { return [...this.activeCycleTexts().values()].map(text => JSON.parse(text)); }
+  cycle(id) { return parse(this.sql('SELECT data FROM cycles WHERE id=?').get(id)); }
+  lastCycle(session) { const text = this.lastCycleTexts().get(sessionKey(session)); return text ? JSON.parse(text) : null; }
   createCycle(data) {
     return this.transaction(() => {
       this.assertManager(); const key = sessionKey(data.session); const box = this.mailbox(key);
-      if (box.locked_cycle || box.blocked || this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='sending'").get(key)) throw new Error('会话已有维护流程或未确认的投递。');
+      if (box.locked_cycle || box.blocked || this.sql("SELECT 1 FROM outbox WHERE target_key=? AND status='sending'").get(key)) throw new Error('会话已有维护流程或未确认的投递。');
       const cycle = { ...data, id: data.id || randomUUID(), revision: 1, createdAt: now(), updatedAt: now() };
-      this.db.prepare('INSERT INTO cycles VALUES(?,?,?,?)').run(cycle.id, key, cycle.state, json(cycle)); this.cycleRevision++;
-      this.db.prepare('UPDATE mailboxes SET locked_cycle=? WHERE session_key=?').run(cycle.id, key);
+      this.sql('INSERT INTO cycles VALUES(?,?,?,?)').run(cycle.id, key, cycle.state, json(cycle)); this.cycleRevision++;
+      this.sql('UPDATE mailboxes SET locked_cycle=? WHERE session_key=?').run(cycle.id, key);
       this.event('cycle_created', { id: cycle.id, session: cycle.session, state: cycle.state }); return cycle;
     });
   }
@@ -213,7 +233,7 @@ export class ManagementStore {
     this.assertManager(); const current = this.cycle(id); if (!current) throw new Error('维护流程不存在。');
     if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error('维护流程版本已改变。');
     const next = { ...current, ...patch, state, revision: current.revision + 1, updatedAt: now() };
-    this.db.prepare('UPDATE cycles SET state=?,data=? WHERE id=?').run(state, json(next), id); this.cycleRevision++;
+    this.sql('UPDATE cycles SET state=?,data=? WHERE id=?').run(state, json(next), id); this.cycleRevision++;
     this.event('cycle_state', { id, state, revision: next.revision }); return next;
   }
   // After the data directory moved, an unfinished cycle of a session working in
@@ -222,20 +242,20 @@ export class ManagementStore {
     const same = path => path.replaceAll('\\', '/').toLowerCase();
     this.transaction(() => {
       for (const cycle of this.activeCycles()) if (typeof cycle.handoffPath === 'string' && same(cycle.handoffPath).startsWith(same(from) + '/')) {
-        this.db.prepare('UPDATE cycles SET data=? WHERE id=?').run(json({ ...cycle, handoffPath: to + cycle.handoffPath.slice(from.length) }), cycle.id);
+        this.sql('UPDATE cycles SET data=? WHERE id=?').run(json({ ...cycle, handoffPath: to + cycle.handoffPath.slice(from.length) }), cycle.id);
         this.cycleRevision++;
       }
     });
   }
-  checkpoint(cycleId, stage) { return parse(this.db.prepare('SELECT data FROM checkpoints WHERE cycle_id=? AND stage=?').get(cycleId, stage)); }
-  saveCheckpoint(cycleId, stage, receipt) { this.db.prepare('INSERT INTO checkpoints VALUES(?,?,?)').run(cycleId, stage, json(receipt)); this.event('checkpoint', { cycleId, stage, at: receipt.at }); }
+  checkpoint(cycleId, stage) { return parse(this.sql('SELECT data FROM checkpoints WHERE cycle_id=? AND stage=?').get(cycleId, stage)); }
+  saveCheckpoint(cycleId, stage, receipt) { this.sql('INSERT INTO checkpoints VALUES(?,?,?)').run(cycleId, stage, json(receipt)); this.event('checkpoint', { cycleId, stage, at: receipt.at }); }
   admit(message) {
     return this.transaction(() => {
       this.assertManager(); const key = sessionKey(message.to); const box = this.mailbox(key); const sequence = box.next_sequence + 1;
-      this.db.prepare('UPDATE mailboxes SET next_sequence=? WHERE session_key=?').run(sequence, key);
+      this.sql('UPDATE mailboxes SET next_sequence=? WHERE session_key=?').run(sequence, key);
       const saved = { ...message, sequence, status: 'queued', ...(box.locked_cycle ? { cycleId: box.locked_cycle, detail: '接收会话正在维护，消息已持久排队。' } : {}) };
       this.create(saved);
-      this.db.prepare('INSERT INTO outbox VALUES(?,?,?,?,?,?)').run(saved.id, key, sequence, 1, 'ready', json({ kind: 'message', messageId: saved.id, to: saved.to }));
+      this.sql('INSERT INTO outbox VALUES(?,?,?,?,?,?)').run(saved.id, key, sequence, 1, 'ready', json({ kind: 'message', messageId: saved.id, to: saved.to }));
       this.event('message_admitted', { id: saved.id, targetKey: key, sequence, cycleId: box.locked_cycle }); return saved;
     });
   }
@@ -246,11 +266,11 @@ export class ManagementStore {
       const quota = this.getSetting('quota-recovery:' + key);
       const snapshot = this.getSnapshot(key);
       if (snapshot?.runtime?.quota || accountQuotaBlocked(snapshot?.runtime) || ['waiting', 'sending', 'attention'].includes(quota?.state)) return null;
-      if (this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='held'").get(key)) return null;
-      if (this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status='sending'").get(key)) return null;
-      const row = this.db.prepare("SELECT * FROM outbox WHERE target_key=? AND status='ready' ORDER BY priority,sequence LIMIT 1").get(key);
+      if (this.sql("SELECT 1 FROM outbox WHERE target_key=? AND status='held'").get(key)) return null;
+      if (this.sql("SELECT 1 FROM outbox WHERE target_key=? AND status='sending'").get(key)) return null;
+      const row = this.sql("SELECT * FROM outbox WHERE target_key=? AND status='ready' ORDER BY priority,sequence LIMIT 1").get(key);
       if (!row) return null;
-      this.db.prepare("UPDATE outbox SET status='sending' WHERE id=?").run(row.id);
+      this.sql("UPDATE outbox SET status='sending' WHERE id=?").run(row.id);
       const data = parse(row); if (data.kind === 'message') this.update(data.messageId, { status: 'pending' });
       this.event('dispatch_intent', { id: row.id, targetKey: key }); return { id: row.id, targetKey: key, ...data };
     });
@@ -258,10 +278,10 @@ export class ManagementStore {
   deferOutbox(id, result) {
     return this.transaction(() => {
       this.assertManager();
-      const row = this.db.prepare("SELECT * FROM outbox WHERE id=? AND status='sending'").get(id);
+      const row = this.sql("SELECT * FROM outbox WHERE id=? AND status='sending'").get(id);
       if (!row || result.notSubmitted !== true) throw new Error('消息暂缓状态不可确认。');
       const item = parse(row); if (item.kind !== 'message') throw new Error('仅普通消息可暂缓。');
-      this.db.prepare("UPDATE outbox SET status='ready' WHERE id=?").run(id);
+      this.sql("UPDATE outbox SET status='ready' WHERE id=?").run(id);
       this.update(item.messageId, { status: 'queued', detail: result.detail, error: null });
       if ((result.runtime?.quota || accountQuotaBlocked(result.runtime)) && result.runtime.sessionId === item.to.id) {
         const previous = this.getSnapshot(item.to);
@@ -273,11 +293,11 @@ export class ManagementStore {
   }
   finishOutbox(id, result) {
     return this.transaction(() => {
-    const row = this.db.prepare('SELECT * FROM outbox WHERE id=?').get(id); if (!row) throw new Error('出站记录不存在。');
+    const row = this.sql('SELECT * FROM outbox WHERE id=?').get(id); if (!row) throw new Error('出站记录不存在。');
     const data = parse(row); const uncertain = result.status === 'unknown';
     const resumeFailed = data.kind === 'resume' && result.status !== 'submitted';
-    this.db.prepare('UPDATE outbox SET status=? WHERE id=?').run(uncertain ? 'unknown' : resumeFailed ? 'failed' : 'done', id);
-    if (uncertain || resumeFailed) this.db.prepare('UPDATE mailboxes SET blocked=1 WHERE session_key=?').run(row.target_key);
+    this.sql('UPDATE outbox SET status=? WHERE id=?').run(uncertain ? 'unknown' : resumeFailed ? 'failed' : 'done', id);
+    if (uncertain || resumeFailed) this.sql('UPDATE mailboxes SET blocked=1 WHERE session_key=?').run(row.target_key);
     // A submitted Claude peer may already carry the receiver's native verdict.
     const native = result.status === 'submitted' ? peerDeliveryOutcome(result.nativeDelivery) : null;
     if (data.kind === 'message') this.update(data.messageId, { ...result, status: native?.status || result.status,
@@ -289,7 +309,7 @@ export class ManagementStore {
     // Native holds settle minutes after submission. Only Claude peer-inbox
     // messages to this exact session move, and an undelivered result is final.
     const key = sessionKey(session);
-    const read = entry => parse(this.db.prepare("SELECT data FROM messages WHERE id=? AND target_key=? AND status IN ('submitted','receiver_held')").get(entry.messageId, key));
+    const read = entry => parse(this.sql("SELECT data FROM messages WHERE id=? AND target_key=? AND status IN ('submitted','receiver_held')").get(entry.messageId, key));
     const changes = entry => {
       const message = read(entry), previous = message?.nativeDelivery;
       if (message?.transport !== 'claude-peer-inbox' || !peerDeliveryOutcome(entry)) return null;
@@ -313,72 +333,77 @@ export class ManagementStore {
   }
   // Whole-table views for the monitoring list: one query each instead of
   // several per session. The latest cycle per session is reused until one changes.
+  lastCycleTexts() {
+    if (this.lastCycleCache?.revision !== this.cycleRevision) this.lastCycleCache = { revision: this.cycleRevision, cycles: null,
+      texts: new Map(this.sql('SELECT session_key, data FROM cycles WHERE rowid IN (SELECT max(rowid) FROM cycles GROUP BY session_key)').all().map(row => [row.session_key, row.data])) };
+    return this.lastCycleCache.texts;
+  }
+  // Shared parsed copies for read-only serialization; lastCycle() returns a private copy.
   lastCycles() {
-    if (this.lastCycleCache?.revision !== this.cycleRevision) this.lastCycleCache = { revision: this.cycleRevision, cycles: new Map(this.db
-      .prepare('SELECT session_key, data FROM cycles WHERE rowid IN (SELECT max(rowid) FROM cycles GROUP BY session_key)').all().map(row => [row.session_key, parse(row)])) };
-    return this.lastCycleCache.cycles;
+    const texts = this.lastCycleTexts();
+    return this.lastCycleCache.cycles ||= new Map([...texts].map(([key, text]) => [key, JSON.parse(text)]));
   }
   queueStates() {
     const states = new Map();
-    for (const row of this.db.prepare("SELECT target_key, status, count(*) AS n FROM outbox WHERE status<>'done' GROUP BY target_key, status").all())
+    for (const row of this.sql("SELECT target_key, status, count(*) AS n FROM outbox WHERE status<>'done' GROUP BY target_key, status").all())
       states.set(row.target_key, { ...states.get(row.target_key), [row.status]: row.n });
     return states;
   }
-  queueCount(session) { return this.db.prepare("SELECT count(*) AS n FROM outbox WHERE target_key=? AND status<>'done'").get(sessionKey(session)).n; }
-  queueState(session) { return Object.fromEntries(this.db.prepare("SELECT status,count(*) AS n FROM outbox WHERE target_key=? AND status<>'done' GROUP BY status").all(sessionKey(session)).map(row => [row.status, row.n])); }
+  queueCount(session) { return this.sql("SELECT count(*) AS n FROM outbox WHERE target_key=? AND status<>'done'").get(sessionKey(session)).n; }
+  queueState(session) { return Object.fromEntries(this.sql("SELECT status,count(*) AS n FROM outbox WHERE target_key=? AND status<>'done' GROUP BY status").all(sessionKey(session)).map(row => [row.status, row.n])); }
   unknownMessages(key) {
-    return this.db.prepare("SELECT m.data FROM outbox o JOIN messages m ON m.id=o.id WHERE o.target_key=? AND o.status='unknown' ORDER BY o.sequence").all(key).map(parse);
+    return this.sql("SELECT m.data FROM outbox o JOIN messages m ON m.id=o.id WHERE o.target_key=? AND o.status='unknown' ORDER BY o.sequence").all(key).map(parse);
   }
   confirmNativeDelivery(id, receipt) {
     return this.transaction(() => {
       this.assertManager();
-      const row = this.db.prepare("SELECT * FROM outbox WHERE id=? AND status='unknown'").get(id);
+      const row = this.sql("SELECT * FROM outbox WHERE id=? AND status='unknown'").get(id);
       if (!row) return false;
       const item = parse(row), message = this.getMessage(id);
       if (item.kind !== 'message' || item.to.client !== 'codex' || receipt?.kind !== 'codex-native-receipt'
         || receipt.messageId !== id || receipt.sessionId !== item.to.id || !/^[a-f0-9]{64}$/.test(receipt.contentHash || '')
         || !(Date.parse(receipt.receivedAt) >= Date.parse(message.createdAt))) throw Error('原生投递回执与消息不匹配。');
-      this.db.prepare("UPDATE outbox SET status='done' WHERE id=?").run(id);
+      this.sql("UPDATE outbox SET status='done' WHERE id=?").run(id);
       this.update(id, { status: 'submitted', detail: '已从接收会话核对完整消息，自动恢复队列。', error: null,
         deliveryReceipt: receipt, submittedAt: receipt.receivedAt, completedAt: now() });
-      const uncertain = this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status IN ('unknown','failed')").get(row.target_key);
-      this.db.prepare('UPDATE mailboxes SET blocked=? WHERE session_key=?').run(uncertain ? 1 : 0, row.target_key);
+      const uncertain = this.sql("SELECT 1 FROM outbox WHERE target_key=? AND status IN ('unknown','failed')").get(row.target_key);
+      this.sql('UPDATE mailboxes SET blocked=? WHERE session_key=?').run(uncertain ? 1 : 0, row.target_key);
       this.event('delivery_reconciled', { id, receipt }); return true;
     });
   }
   resolveDelivery(id, outcome) {
     return this.transaction(() => {
-      const row = this.db.prepare('SELECT * FROM outbox WHERE id=?').get(id);
+      const row = this.sql('SELECT * FROM outbox WHERE id=?').get(id);
       if (!row || !['unknown', 'failed'].includes(row.status) || !['submitted', 'not_submitted'].includes(outcome)) throw new Error('该出站记录不支持此确认操作。');
-      this.db.prepare('UPDATE outbox SET status=? WHERE id=?').run(outcome === 'submitted' ? 'done' : 'ready', id);
+      this.sql('UPDATE outbox SET status=? WHERE id=?').run(outcome === 'submitted' ? 'done' : 'ready', id);
       const item = parse(row);
       if (item.kind === 'message') this.update(item.messageId, { status: outcome === 'submitted' ? 'submitted' : 'queued',
         detail: outcome === 'submitted' ? '用户核对原会话后确认已提交。' : '用户确认未提交，允许重新投递。', error: null });
-      const uncertain = this.db.prepare("SELECT 1 FROM outbox WHERE target_key=? AND status IN ('unknown','failed')").get(row.target_key);
-      this.db.prepare('UPDATE mailboxes SET blocked=? WHERE session_key=?').run(uncertain ? 1 : 0, row.target_key);
+      const uncertain = this.sql("SELECT 1 FROM outbox WHERE target_key=? AND status IN ('unknown','failed')").get(row.target_key);
+      this.sql('UPDATE mailboxes SET blocked=? WHERE session_key=?').run(uncertain ? 1 : 0, row.target_key);
       this.event('delivery_manually_resolved', { id, outcome }); return row.target_key;
     });
   }
   releaseHeld(session) {
     return this.transaction(() => {
       const key = sessionKey(session); if (this.mailbox(key).locked_cycle) throw new Error('该会话仍在维护，暂不能释放队列。');
-      for (const row of this.db.prepare("SELECT id,data FROM outbox WHERE target_key=? AND status='held'").all(key)) {
-        this.db.prepare("UPDATE outbox SET status='ready' WHERE id=?").run(row.id);
+      for (const row of this.sql("SELECT id,data FROM outbox WHERE target_key=? AND status='held'").all(key)) {
+        this.sql("UPDATE outbox SET status='ready' WHERE id=?").run(row.id);
         const item = parse(row); if (item.kind === 'message') this.update(item.messageId, { status: 'queued', detail: '用户释放了保留的消息。' });
       }
       this.event('held_messages_released', { targetKey: key }); return key;
     });
   }
-  readyTargets() { return this.db.prepare("SELECT DISTINCT target_key FROM outbox WHERE status IN ('ready','unknown')").all().map(r => r.target_key); }
+  readyTargets() { return this.sql("SELECT DISTINCT target_key FROM outbox WHERE status IN ('ready','unknown')").all().map(r => r.target_key); }
   releaseCycle(cycleId, { resumeText, cancel = false, releaseMessages = true } = {}) {
     return this.transaction(() => {
       this.assertManager(); const cycle = this.cycle(cycleId); if (!cycle) throw new Error('维护流程不存在。');
       const key = sessionKey(cycle.session); const box = this.mailbox(key);
       if (box.locked_cycle !== cycleId) throw new Error('会话锁与当前流程不一致。');
-      if (resumeText) this.db.prepare('INSERT INTO outbox VALUES(?,?,?,?,?,?)').run('continue:' + cycleId, key, 0, 0, 'ready', json({ kind: 'resume', text: resumeText, to: cycle.session, cycleId }));
+      if (resumeText) this.sql('INSERT INTO outbox VALUES(?,?,?,?,?,?)').run('continue:' + cycleId, key, 0, 0, 'ready', json({ kind: 'resume', text: resumeText, to: cycle.session, cycleId }));
       if (!releaseMessages) {
-        for (const row of this.db.prepare("SELECT id,data FROM outbox WHERE target_key=? AND status='ready'").all(key)) {
-          this.db.prepare("UPDATE outbox SET status='held' WHERE id=?").run(row.id);
+        for (const row of this.sql("SELECT id,data FROM outbox WHERE target_key=? AND status='ready'").all(key)) {
+          this.sql("UPDATE outbox SET status='held' WHERE id=?").run(row.id);
           const item = parse(row); if (item.kind === 'message') this.update(item.messageId, { status: 'held', detail: '维护已取消；消息按用户选择保留，等待手动释放。' });
         }
       }
@@ -390,7 +415,7 @@ export class ManagementStore {
       this.updateCycle(cycleId, cancel ? 'cancelled' : 'completed', { completedAt: now(), resumed: Boolean(resumeText),
         ...(cancelledDuringTurn ? { cancelledDuringTurn } : {}) });
       this.restartConfirmation?.resolveWork(cycle.session, 'maintenance:' + cycleId);
-      this.db.prepare('UPDATE mailboxes SET locked_cycle=NULL WHERE session_key=?').run(key); return cycle;
+      this.sql('UPDATE mailboxes SET locked_cycle=NULL WHERE session_key=?').run(key); return cycle;
     });
   }
   async migrateLegacy({ dryRun = false } = {}) {

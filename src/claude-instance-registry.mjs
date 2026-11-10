@@ -9,6 +9,7 @@ const indexes = new Map();
 const MAX_AGE_MS = 1000;
 const OWNED = /^(\d+)-[0-9a-f-]{36}\.json(\.tmp)?$/i;
 
+export function processAlive(pid) { return alive(pid); }
 function alive(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return false;
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }

@@ -1,8 +1,17 @@
-import { readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
+import { readFile, readdir, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { join, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const filename = root => join(root, '.plexus', 'codex-bridge.json');
+// Each probe starts a Node process. A saved connection whose Codex pipe no
+// longer exists cannot answer, so it is skipped; listing the pipe namespace
+// does not connect to any pipe.
+export async function pipeExists(path) {
+  const name = /^\\\\\.\\pipe\\(.+)$/i.exec(path || '')?.[1];
+  if (process.platform !== 'win32' || !name) return true;
+  try { return (await readdir('\\\\.\\pipe\\')).some(entry => entry.toLowerCase() === name.toLowerCase()); }
+  catch { return true; }
+}
 const validId = value => typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value);
 function validContext(value) {
   if (!value || !validId(value.callerThreadId) || typeof value.pipePath !== 'string' || value.pipePath.length > 512) return null;
@@ -47,14 +56,17 @@ export async function rememberCodexBridge(root, context = codexContextFromEnviro
 export class CodexBridgeConnection {
   constructor({ root, context, probe, onUpdate = () => {}, intervalMs = 15000 }) {
     this.root = root; this.startupContext = validContext(context); this.onUpdate = onUpdate; this.intervalMs = intervalMs;
-    this.probe = probe || (async context => (await import('./adapters/codex.mjs')).probeCodexBridge({ ...context, handshakeTimeoutMs: 3000 }));
+    this.probe = probe || (async context => {
+      if (!await pipeExists(context.pipePath)) throw new Error('CODEX_PIPE_GONE');
+      return (await import('./adapters/codex.mjs')).probeCodexBridge({ ...context, handshakeTimeoutMs: 3000 });
+    });
     this.state = { connected: false, state: 'checking', detail: '正在连接 Codex…', checkedAt: null };
-    this.closed = false; this.inFlight = null; this.context = null;
+    this.closed = false; this.inFlight = null; this.context = null; this.probedAt = 0;
   }
   async init() {
     await rememberCodexBridge(this.root, this.startupContext);
     await this.refresh();
-    this.timer = setInterval(() => { void this.refresh(); }, this.intervalMs); this.timer.unref();
+    this.timer = setInterval(() => { void this.refresh({ periodic: true }); }, this.intervalMs); this.timer.unref();
     return this;
   }
   status() { return { ...this.state }; }
@@ -65,10 +77,15 @@ export class CodexBridgeConnection {
       checkedAt: new Date().toISOString() };
     if (previous.state !== this.state.state) this.onUpdate(this.status());
   }
-  refresh() {
+  refresh({ periodic = false } = {}) {
     if (this.closed) return Promise.resolve(this.status());
     if (this.inFlight) return this.inFlight;
-    this.inFlight = this.check().finally(() => { this.inFlight = null; }); return this.inFlight;
+    // While connected, the timer only confirms the pipe still exists; a full
+    // probe starts a Node process and runs at most every five minutes.
+    const light = periodic && this.state.connected && this.context && Date.now() - this.probedAt < 5 * 60_000;
+    this.inFlight = (light ? pipeExists(this.context.pipePath).then(alive => alive ? this.status() : this.check()) : this.check())
+      .finally(() => { this.inFlight = null; });
+    return this.inFlight;
   }
   async check() {
     const candidates = [...await savedContexts(this.root), this.context, this.startupContext].filter(Boolean);
@@ -77,7 +94,7 @@ export class CodexBridgeConnection {
       const key = JSON.stringify(candidate); if (seen.has(key)) continue; seen.add(key);
       try {
         await this.probe(candidate);
-        this.context = candidate; this.setState(true); return this.status();
+        this.context = candidate; this.probedAt = Date.now(); this.setState(true); return this.status();
       } catch { /* Keep looking for another already-authorized connection. */ }
     }
     this.setState(false, candidates.length > 0); return this.status();

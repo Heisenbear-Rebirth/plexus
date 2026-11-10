@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { access, readdir } from 'node:fs/promises';
+import { access, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -91,6 +91,13 @@ function toSession(row) {
   };
 }
 
+// Discovery lists sessions every 15 s from a state database of tens of MB. While
+// neither the database nor its WAL has changed, the previous listing is reused.
+const listings = new Map();
+async function databaseSignature(file) {
+  return (await Promise.all([file, file + '-wal'].map(name => stat(name).then(info => `${info.size}:${info.mtimeMs}`, () => '-')))).join('/');
+}
+
 async function readSessions({ codexHome, id } = {}) {
   const policy = await readAccessPolicy();
   const warnings = [];
@@ -107,9 +114,13 @@ async function readSessions({ codexHome, id } = {}) {
 
   // A newer schema replaces older state databases. Do not merge stale generations.
   for (const entry of databases) {
+    const file = join(homeDirectory(codexHome), entry.name);
+    const signature = id == null ? `${policy.denied.join('\n')}|${await databaseSignature(file)}` : null;
+    const cached = signature && listings.get(file);
+    if (cached?.signature === signature) return { sessions: cached.sessions, warnings: [...warnings, ...cached.warnings] };
     let database;
     try {
-      database = new DatabaseSync(join(homeDirectory(codexHome), entry.name), { readOnly: true });
+      database = new DatabaseSync(file, { readOnly: true });
       database.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 1000;');
       const columns = new Set(database.prepare('PRAGMA table_info(threads)').all().map((column) => column.name));
       if (!columns.has('id') || !columns.has('cwd')) {
@@ -117,13 +128,16 @@ async function readSessions({ codexHome, id } = {}) {
         continue;
       }
       // Never SELECT *: these tables also contain prompts, previews and history paths.
-      if (!columns.has('source')) warnings.push(`Codex history schema in ${entry.name} cannot identify user conversations; unverified rows are hidden.`);
+      const found = columns.has('source') ? [LIVE_STATUS_WARNING]
+        : [`Codex history schema in ${entry.name} cannot identify user conversations; unverified rows are hidden.`, LIVE_STATUS_WARNING];
       const selected = ['id', 'name', 'title', 'cwd', 'updated_at_ms', 'updated_at', 'created_at_ms', 'created_at', 'source', 'thread_source', 'agent_role', 'agent_path']
         .filter((column) => columns.has(column));
       database.function('plexus_directory_allowed', { deterministic: true }, cwd => policy.permits(plainDirectory(cwd || '')) ? 1 : 0);
       const statement = database.prepare(`SELECT ${selected.map((column) => `"${column}"`).join(', ')} FROM threads WHERE plexus_directory_allowed(cwd)=1${id == null ? '' : ' AND id = ?'}`);
       const rows = id == null ? statement.all() : statement.all(id);
-      return { sessions: rows.filter((row) => policy.permits(plainDirectory(row.cwd || '')) && typeof row.id === 'string' && row.id && isUserSession(row)).map(toSession), warnings: [...warnings, LIVE_STATUS_WARNING] };
+      const sessions = rows.filter((row) => policy.permits(plainDirectory(row.cwd || '')) && typeof row.id === 'string' && row.id && isUserSession(row)).map(toSession);
+      if (signature) listings.set(file, { signature, sessions, warnings: found });
+      return { sessions, warnings: [...warnings, ...found] };
     } catch {
       warnings.push(`Codex history database ${entry.name} could not be read.`);
     } finally {

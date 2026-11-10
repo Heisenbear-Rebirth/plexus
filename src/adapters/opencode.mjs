@@ -1,11 +1,16 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { containsDirectory } from '../directory-service.mjs';
 import { installationRoot, localEndpoint, sameDirectory } from '../opencode-bridge.mjs';
 import { readAccessPolicy } from '../access-policy.mjs';
+import { processAlive } from '../claude-instance-registry.mjs';
+
+// Read-only requests to a backend that refused the connection are skipped for
+// a while; sends and maintenance are always attempted.
+const READ_ONLY = new Set(['find', 'list', 'status', 'lifecycle']), REFUSED_MS = 30000;
 
 export function createOpenCodeAdapter({ root = installationRoot, timeout = 15000 } = {}) {
-  const folder = join(root, '.plexus', 'opencode', 'instances');
+  const folder = join(root, '.plexus', 'opencode', 'instances'), refused = new Map();
   // Concurrent directory scans share one read of the registrations.
   let recordsRead = null;
   function records() { return recordsRead ||= readRecords().finally(() => { recordsRead = null; }); }
@@ -17,6 +22,8 @@ export function createOpenCodeAdapter({ root = installationRoot, timeout = 15000
       try {
         const filename = join(folder, name); if ((await stat(filename)).size > 8192) continue;
         const r = JSON.parse(await readFile(filename, 'utf8'));
+        // A backend that crashed or was killed never removes its registration.
+        if (Number.isSafeInteger(r.pid) && !processAlive(r.pid)) { await unlink(filename).catch(() => {}); continue; }
         if (!access.permits(r.directory)) continue;
         if (r.protocol !== 1 || name !== r.instanceId + '.json' || !/^[0-9a-f]{64}$/.test(r.token) || typeof r.directory !== 'string') continue;
         localEndpoint(r.endpoint); result.push(r);
@@ -25,8 +32,13 @@ export function createOpenCodeAdapter({ root = installationRoot, timeout = 15000
     return result;
   }
   async function rpc(record, input) {
-    const response = await fetch(localEndpoint(record.endpoint) + '/rpc', { method: 'POST', redirect: 'error',
-      headers: { Authorization: 'Bearer ' + record.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, instanceId: record.instanceId }), signal: AbortSignal.timeout(timeout) });
+    const readOnly = READ_ONLY.has(input.action);
+    if (readOnly && Date.now() < (refused.get(record.instanceId) || 0)) throw new Error('OpenCode bridge refused the connection.');
+    let response;
+    try { response = await fetch(localEndpoint(record.endpoint) + '/rpc', { method: 'POST', redirect: 'error',
+      headers: { Authorization: 'Bearer ' + record.token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, instanceId: record.instanceId }), signal: AbortSignal.timeout(timeout) }); }
+    catch (error) { if (error?.cause?.code === 'ECONNREFUSED') refused.set(record.instanceId, Date.now() + REFUSED_MS); throw error; }
+    refused.delete(record.instanceId);
     if (!response.ok) throw new Error('OpenCode bridge rejected the operation.');
     return response.json();
   }

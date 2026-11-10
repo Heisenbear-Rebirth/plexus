@@ -145,7 +145,10 @@ export class IncrementalContextReader {
   constructor(client, id) { this.client = client; this.id = id; this.offset = 0; this.pending = ''; this.decoder = new StringDecoder('utf8'); this.accumulator = createUsageAccumulator(client, id); }
   reset() { this.offset = 0; this.pending = ''; this.decoder = new StringDecoder('utf8'); this.accumulator = createUsageAccumulator(this.client, this.id); this.windowed = false; this.skipPartial = false; }
   async read() {
-    this.filename ||= await contextSourcePath({ client: this.client, id: this.id });
+    // A session without a saved record is looked up again after 30 s, not on every sample.
+    if (!this.filename && Date.now() < (this.missingUntil || 0)) throw this.missing;
+    try { this.filename ||= await contextSourcePath({ client: this.client, id: this.id }); }
+    catch (error) { this.missing = error; this.missingUntil = Date.now() + 30000; throw error; }
     // A resumed Codex session writes its rollout uncompressed again.
     if (this.filename.endsWith('.zst')) {
       if (!await exists(this.filename.slice(0, -4))) return this.readArchive();

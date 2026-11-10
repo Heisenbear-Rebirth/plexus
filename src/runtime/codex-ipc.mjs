@@ -11,21 +11,33 @@ const MAX_FRAME_BYTES = 128 * 1024 * 1024;
 
 // Normal independent desktop peer. Never claims ownership or another client's ID.
 export class CodexIpc extends EventEmitter {
-  constructor({ endpoint = '\\\\.\\pipe\\codex-ipc', timeoutMs = 5000 } = {}) {
-    super(); this.endpoint = endpoint; this.timeoutMs = timeoutMs; this.clientId = 'initializing-client';
+  constructor({ endpoint = '\\\\.\\pipe\\codex-ipc', timeoutMs = 5000, retryDelayMs = 0 } = {}) {
+    super(); this.endpoint = endpoint; this.timeoutMs = timeoutMs; this.retryDelayMs = retryDelayMs; this.clientId = 'initializing-client';
     this.header = Buffer.alloc(4); this.headerBytes = 0; this.frame = null; this.frameBytes = 0;
-    this.pending = new Map(); this.connected = false;
+    this.pending = new Map(); this.connected = false; this.connecting = null; this.retryAt = 0;
   }
-  async connect() {
-    if (this.connected) return this;
-    this.socket = createConnection(this.endpoint);
-    this.socket.on('data', bytes => this.receive(bytes));
-    this.socket.on('error', () => this.disconnect(fail('CODEX_IPC_OFFLINE', 'unknown')));
-    this.socket.on('close', () => this.disconnect(fail('CODEX_IPC_CLOSED', 'unknown')));
+  // Concurrent callers share one attempt; registration finishes before any of
+  // them sends. After a failure, callers within retryDelayMs get that failure.
+  connect() {
+    if (this.connecting) return this.connecting;
+    if (this.connected) return Promise.resolve(this);
+    if (Date.now() < this.retryAt) return Promise.reject(this.lastFailure);
+    this.connecting = this.open().catch(error => {
+      if (this.retryDelayMs) { this.retryAt = Date.now() + this.retryDelayMs; this.lastFailure = error; }
+      throw error;
+    }).finally(() => { this.connecting = null; });
+    return this.connecting;
+  }
+  async open() {
+    const socket = this.socket = createConnection(this.endpoint);
+    // A replaced socket's late events must not mark the newer connection lost.
+    socket.on('data', bytes => { if (this.socket === socket) this.receive(bytes); });
+    socket.on('error', () => { if (this.socket === socket) this.disconnect(fail('CODEX_IPC_OFFLINE', 'unknown')); });
+    socket.on('close', () => { if (this.socket === socket) this.disconnect(fail('CODEX_IPC_CLOSED', 'unknown')); });
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.socket.destroy(); reject(fail('CODEX_IPC_CONNECT_TIMEOUT')); }, this.timeoutMs);
-      this.socket.once('connect', () => { clearTimeout(timer); this.connected = true; resolve(); });
-      this.socket.once('error', error => { clearTimeout(timer); reject(fail(`CODEX_IPC_OFFLINE:${error.code || 'UNKNOWN'}`)); });
+      const timer = setTimeout(() => { socket.destroy(); reject(fail('CODEX_IPC_CONNECT_TIMEOUT')); }, this.timeoutMs);
+      socket.once('connect', () => { clearTimeout(timer); this.connected = true; resolve(); });
+      socket.once('error', error => { clearTimeout(timer); reject(fail(`CODEX_IPC_OFFLINE:${error.code || 'UNKNOWN'}`)); });
     });
     try {
       const result = await this.request('initialize', { clientType: 'plexus-runtime' });
@@ -89,4 +101,13 @@ export class CodexIpc extends EventEmitter {
     if (wasConnected) this.emit('disconnected', error);
   }
   close() { this.disconnect(fail('CODEX_IPC_CLOSED', 'unknown')); this.socket?.destroy(); }
+}
+
+// One connection serves every Codex conversation in this process. With one
+// connection per conversation, the host announced each new client to all the
+// others, and a missing pipe was probed by every conversation separately.
+let shared = null;
+export function sharedCodexIpc() {
+  if (!shared) { shared = new CodexIpc({ retryDelayMs: 2000 }); shared.shared = true; shared.setMaxListeners(0); }
+  return shared;
 }

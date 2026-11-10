@@ -11,7 +11,7 @@ export class ContextMonitor {
     this.injectedRuntime = Boolean(runtimeFactory);
     this.runtimeFactory = runtimeFactory || service.runtimeFactory || (session => createRuntime(session, { opencode: service.adapters?.opencode }));
     this.inFlight = new Map(); this.discovered = []; this.discoveryAt = 0; this.discoverySignature = ''; this.closed = false;
-    this.nextSampleAt = new Map(); this.nativeQueryAt = new Map();
+    this.nextSampleAt = new Map(); this.nativeQueryAt = new Map(); this.missing = new Map();
   }
   runtime(session) { const key = sessionKey(session); if (!this.clients.has(key)) this.clients.set(key, this.runtimeFactory(session)); return this.clients.get(key); }
   async observeAll() {
@@ -51,14 +51,22 @@ export class ContextMonitor {
   }
   sample(session, { native = false } = {}) {
     const key = sessionKey(session); if (this.inFlight.has(key)) return this.inFlight.get(key);
+    // An enabled policy can outlive its session. Searching every client record
+    // for it on each 2 s tick cost most of the idle file I/O; retry once a minute.
+    const missing = this.missing.get(key);
+    if (!native && missing && Date.now() < missing.until) return Promise.reject(missing.error);
     const work = this.readSample(session, native).finally(() => this.inFlight.delete(key)); this.inFlight.set(key, work); return work;
   }
   async readSample(session, native) {
     const access = await readAccessPolicy();
+    const key = sessionKey(session);
     const metadata = session.cwd ? session : await this.service.adapters?.[session.client]?.find(session.id);
-    if (metadata?.cwd) access.assert(metadata.cwd);
-    else if (!this.injectedRuntime) throw new Error('无法在获准目录内确认该会话，停止原生观察。');
-    const key = sessionKey(session), adapter = this.runtime(session);
+    if (metadata?.cwd) { access.assert(metadata.cwd); this.missing.delete(key); }
+    else if (!this.injectedRuntime) {
+      const error = new Error('无法在获准目录内确认该会话，停止原生观察。');
+      this.missing.set(key, { error, until: Date.now() + 60000 }); throw error;
+    }
+    const adapter = this.runtime(session);
     let runtime, usage, error;
     try {
       runtime = await adapter.status();
